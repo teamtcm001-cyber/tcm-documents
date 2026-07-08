@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { uploadToDrive, driveFileUrl } from '../utils/googleDrive.js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -109,31 +110,11 @@ export async function fetchLatestFiles(limit = 10) {
   return data || [];
 }
 
-// Supabase Storage rejects object keys containing non-ASCII characters (e.g. Thai)
-// with "Invalid key" — sanitize only the storage path, keep the real filename
-// in the `name` column for display/download.
-function sanitizeStorageKey(filename) {
-  const dot = filename.lastIndexOf('.');
-  const base = dot > 0 ? filename.slice(0, dot) : filename;
-  const ext = dot > 0 ? filename.slice(dot) : '';
-  const safeBase = base
-    .normalize('NFKD')
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .replace(/_+/g, '_')
-    .slice(0, 150) || 'file';
-  return safeBase + ext;
-}
-
 export async function uploadFile(projectId, file, fileType, uploaderName, contentText = null) {
   const user = await getCurrentUser();
 
-  // 1. Upload to storage
-  const fileName = `${projectId}/${Date.now()}-${sanitizeStorageKey(file.name)}`;
-  const { data: storageData, error: storageError } = await supabase.storage
-    .from('documents')
-    .upload(fileName, file);
-
-  if (storageError) throw storageError;
+  // 1. Upload to Google Drive — storage_path stores the Drive file id
+  const driveFileId = await uploadToDrive(file);
 
   // 2. Insert file record (with optional content_text for search)
   const baseName = file.name.replace(/\.\w+$/, '').replace(/_(rev\s*\d+|v\d+|\d{4}-\d{2}-\d{2})$/i, '');
@@ -146,7 +127,7 @@ export async function uploadFile(projectId, file, fileType, uploaderName, conten
     base_name: baseName,
     size: Math.round(file.size / 1024),
     ext: ext,
-    storage_path: fileName,
+    storage_path: driveFileId,
     uploader_id: user.id,
     uploader_name: uploaderName,
     is_latest: true
@@ -194,30 +175,20 @@ export async function updateFileContent(fileId, contentText) {
 
 // Get file blob from storage (for reindexing)
 export async function getFileBlob(storagePath) {
-  const { data, error } = await supabase.storage
-    .from('documents')
-    .download(storagePath);
-  if (error) throw error;
-  return data;
+  const res = await fetch(driveFileUrl(storagePath));
+  if (!res.ok) throw new Error('ไม่สามารถอ่านไฟล์จาก Google Drive ได้');
+  return res.blob();
 }
 
-// Get public URL for a file (used by Preview)
+// Get URL for a file (used by Preview) — proxied through /api/drive-file
 export function getFilePublicUrl(storagePath) {
   if (!storagePath) return '';
-  const { data } = supabase.storage
-    .from('documents')
-    .getPublicUrl(storagePath);
-  return data?.publicUrl || '';
+  return driveFileUrl(storagePath);
 }
 
-// Get signed URL (more secure, time-limited) — alternative to public URL
-export async function getFileSignedUrl(storagePath, expiresIn = 3600) {
-  if (!storagePath) return '';
-  const { data, error } = await supabase.storage
-    .from('documents')
-    .createSignedUrl(storagePath, expiresIn);
-  if (error) throw error;
-  return data?.signedUrl || '';
+// Kept for API compatibility — Drive proxy URL is already access-controlled server-side
+export async function getFileSignedUrl(storagePath) {
+  return getFilePublicUrl(storagePath);
 }
 
 export async function deleteFile(fileId) {
@@ -237,19 +208,12 @@ export async function downloadFile(fileId, fileName) {
 
   if (error) throw error;
 
-  const { data: fileData, error: downloadError } = await supabase.storage
-    .from('documents')
-    .download(data.storage_path);
-
-  if (downloadError) throw downloadError;
-
-  // Trigger download
-  const url = URL.createObjectURL(fileData);
+  // Trigger download via the Drive proxy endpoint
+  const url = driveFileUrl(data.storage_path, { download: true, name: fileName });
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName || 'file';
   a.click();
-  URL.revokeObjectURL(url);
 }
 
 // ============ ACTIVITY/TIMELINE ============
