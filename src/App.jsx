@@ -3,6 +3,7 @@ import { supabase, getCurrentUser, fetchProjects, fetchLatestFiles } from './api
 import { normalizeFile, computeIsLatest } from './utils/format.js'
 import { ToastProvider } from './components/Toast.jsx'
 import Auth from './components/Auth.jsx'
+import ResetPassword from './components/ResetPassword.jsx'
 import Topbar from './components/Topbar.jsx'
 import Hero from './components/Hero.jsx'
 import Dashboard from './components/Dashboard.jsx'
@@ -15,6 +16,7 @@ import MOMWriter from './components/MOMWriter.jsx'
 export default function App() {
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [recoveryMode, setRecoveryMode] = useState(false)
 
   useEffect(() => {
     getCurrentUser()
@@ -24,7 +26,10 @@ export default function App() {
       })
       .catch(() => setAuthLoading(false))
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setRecoveryMode(true)
+      }
       setUser(session?.user || null)
     })
 
@@ -36,6 +41,14 @@ export default function App() {
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
         <div className="spinner"></div>
       </div>
+    )
+  }
+
+  if (recoveryMode) {
+    return (
+      <ToastProvider>
+        <ResetPassword onDone={() => setRecoveryMode(false)} />
+      </ToastProvider>
     )
   }
 
