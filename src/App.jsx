@@ -58,7 +58,9 @@ export default function App() {
   }
 
   return (
-    <ToastProvider>{user ? <MainApp user={user} /> : <Auth />}</ToastProvider>
+    <ToastProvider>
+      {user ? <MainApp user={user} /> : <Auth onRecoveryVerified={() => setRecoveryMode(true)} />}
+    </ToastProvider>
   )
 }
 

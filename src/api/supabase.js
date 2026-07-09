@@ -59,6 +59,14 @@ export async function updatePassword(newPassword) {
   if (error) throw error;
 }
 
+// Verify the 6-digit code emailed by resetPasswordForEmail — used instead of the
+// clickable link, which corporate email security scanners can pre-fetch and burn
+// (the link is single-use, so the real click then fails with "otp_expired").
+export async function verifyRecoveryOtp(email, token) {
+  const { error } = await supabase.auth.verifyOtp({ email, token, type: 'recovery' });
+  if (error) throw error;
+}
+
 // ============ PROJECTS ============
 export async function fetchProjects() {
   const { data, error } = await supabase

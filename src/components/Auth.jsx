@@ -1,12 +1,13 @@
 import { useState } from 'react'
-import { signUp, signIn, resetPasswordForEmail } from '../api/supabase.js'
+import { signUp, signIn, resetPasswordForEmail, verifyRecoveryOtp } from '../api/supabase.js'
 import Icon from './Icon.jsx'
 
-export default function Auth() {
+export default function Auth({ onRecoveryVerified }) {
   const [mode, setMode] = useState('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
+  const [otpCode, setOtpCode] = useState('')
   const [msg, setMsg] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -20,7 +21,11 @@ export default function Auth() {
         setMsg({ kind: 'ok', text: 'สมัครสำเร็จ! กรุณายืนยัน Email ที่ส่งให้คุณ' })
       } else if (mode === 'forgot') {
         await resetPasswordForEmail(email)
-        setMsg({ kind: 'ok', text: 'ส่งลิงก์รีเซ็ตรหัสผ่านไปที่อีเมลแล้ว กรุณาเช็คกล่องจดหมาย' })
+        setMode('otp')
+        setMsg({ kind: 'ok', text: 'ส่งรหัสยืนยันไปที่อีเมลแล้ว กรอกรหัสด้านล่างเพื่อตั้งรหัสผ่านใหม่' })
+      } else if (mode === 'otp') {
+        await verifyRecoveryOtp(email, otpCode)
+        onRecoveryVerified()
       } else {
         await signIn(email, password)
       }
@@ -29,6 +34,12 @@ export default function Auth() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const backToSignin = () => {
+    setMode('signin')
+    setOtpCode('')
+    setMsg(null)
   }
 
   return (
@@ -45,7 +56,7 @@ export default function Auth() {
           </div>
         </div>
 
-        {mode !== 'forgot' && (
+        {mode === 'signin' || mode === 'signup' ? (
           <div className="auth-tabs">
             <button
               className={mode === 'signin' ? 'tab on' : 'tab'}
@@ -68,7 +79,7 @@ export default function Auth() {
               สมัครสมาชิก
             </button>
           </div>
-        )}
+        ) : null}
 
         <form onSubmit={handleSubmit}>
           {mode === 'signup' && (
@@ -83,17 +94,21 @@ export default function Auth() {
               />
             </div>
           )}
-          <div className="field">
-            <label>Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your-email@teamcm.co.th"
-              required
-            />
-          </div>
-          {mode !== 'forgot' && (
+
+          {mode !== 'otp' && (
+            <div className="field">
+              <label>Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="your-email@teamcm.co.th"
+                required
+              />
+            </div>
+          )}
+
+          {(mode === 'signin' || mode === 'signup') && (
             <div className="field">
               <label>Password</label>
               <input
@@ -103,6 +118,21 @@ export default function Auth() {
                 placeholder="อย่างน้อย 6 ตัว"
                 minLength={6}
                 required
+              />
+            </div>
+          )}
+
+          {mode === 'otp' && (
+            <div className="field">
+              <label>รหัสยืนยันจากอีเมล ({email})</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={otpCode}
+                onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                placeholder="กรอกรหัสตัวเลขจากอีเมล"
+                required
+                autoFocus
               />
             </div>
           )}
@@ -124,25 +154,24 @@ export default function Auth() {
           {msg && <div className={`auth-msg ${msg.kind}`}>{msg.text}</div>}
 
           <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: 6 }} disabled={submitting}>
-            <Icon name={mode === 'forgot' ? 'send' : mode === 'signin' ? 'arrow-r' : 'check'} size={15} />
+            <Icon name={mode === 'forgot' || mode === 'otp' ? 'send' : mode === 'signin' ? 'arrow-r' : 'check'} size={15} />
             {submitting
               ? 'กำลังโหลด...'
               : mode === 'forgot'
-                ? 'ส่งลิงก์รีเซ็ตรหัสผ่าน'
-                : mode === 'signin'
-                  ? 'เข้าสู่ระบบ'
-                  : 'สมัครสมาชิก'}
+                ? 'ส่งรหัสยืนยัน'
+                : mode === 'otp'
+                  ? 'ยืนยันรหัส'
+                  : mode === 'signin'
+                    ? 'เข้าสู่ระบบ'
+                    : 'สมัครสมาชิก'}
           </button>
 
-          {mode === 'forgot' && (
+          {(mode === 'forgot' || mode === 'otp') && (
             <button
               type="button"
               className="link-btn"
               style={{ background: 'none', border: 'none', padding: 0, marginTop: 10, fontSize: 12.5, color: 'var(--gray-400)', cursor: 'pointer' }}
-              onClick={() => {
-                setMode('signin')
-                setMsg(null)
-              }}
+              onClick={backToSignin}
             >
               ← กลับไปเข้าสู่ระบบ
             </button>
