@@ -16,7 +16,12 @@ import MOMWriter from './components/MOMWriter.jsx'
 export default function App() {
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
-  const [recoveryMode, setRecoveryMode] = useState(false)
+  // Check the URL hash synchronously on first render — the Supabase client's own
+  // hash processing is async and can resolve before this component's useEffect
+  // registers the onAuthStateChange listener, dropping the PASSWORD_RECOVERY event.
+  const [recoveryMode, setRecoveryMode] = useState(
+    () => typeof window !== 'undefined' && window.location.hash.includes('type=recovery')
+  )
 
   useEffect(() => {
     getCurrentUser()
