@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { supabase, getCurrentUser, signIn, fetchProjects, fetchLatestFiles } from './api/supabase.js'
+import { supabase, getCurrentUser, signIn, logVisit, fetchProjects, fetchLatestFiles } from './api/supabase.js'
 import { normalizeFile } from './utils/format.js'
 import { getLocalName } from './utils/localIdentity.js'
 import { ToastProvider } from './components/Toast.jsx'
@@ -75,9 +75,20 @@ export default function App() {
   // the real person instead of the shared account for everyone.
   const displayUser = { ...user, user_metadata: { ...user.user_metadata, full_name: localName } }
 
+  return <Ready displayUser={displayUser} localName={localName} onChangeName={() => setEditingName(true)} />
+}
+
+// Logs one visit row per app load (covers both first-time name entry and
+// returning visitors whose name is already cached) — the only backend trail
+// of who's using the app, since everyone otherwise shares one account.
+function Ready({ displayUser, localName, onChangeName }) {
+  useEffect(() => {
+    logVisit(localName)
+  }, [localName])
+
   return (
     <ToastProvider>
-      <MainApp user={displayUser} onChangeName={() => setEditingName(true)} />
+      <MainApp user={displayUser} onChangeName={onChangeName} />
     </ToastProvider>
   )
 }

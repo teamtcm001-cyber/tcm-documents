@@ -29,6 +29,14 @@ export async function getCurrentUser() {
   return user;
 }
 
+// Records that someone with this display name opened the app — since every
+// visitor shares one Supabase account, this is the only backend record of
+// who's actually using the app (until they upload/edit something).
+export async function logVisit(displayName) {
+  const { error } = await supabase.from('app_visits').insert([{ display_name: displayName }]);
+  if (error) console.error('logVisit failed:', error.message);
+}
+
 // ============ PROJECTS ============
 export async function fetchProjects() {
   const { data, error } = await supabase
