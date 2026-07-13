@@ -1,5 +1,4 @@
 import Icon from './Icon.jsx'
-import { signOut } from '../api/supabase.js'
 
 export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, onOpenMOM }) {
   const initials = (() => {
@@ -42,14 +41,6 @@ export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, 
           <div className="avatar">{initials}</div>
           <span className="uname">{displayName}</span>
         </div>
-        <button
-          className="btn btn-sm"
-          style={{ background: 'var(--gray-100)', color: 'var(--navy)' }}
-          onClick={signOut}
-          title="ออกจากระบบ"
-        >
-          <Icon name="logout" size={15} />
-        </button>
       </div>
     </header>
   )

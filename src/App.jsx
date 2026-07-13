@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react'
-import { supabase, getCurrentUser, fetchProjects, fetchLatestFiles } from './api/supabase.js'
-import { normalizeFile, computeIsLatest } from './utils/format.js'
+import { supabase, getCurrentUser, signIn, fetchProjects, fetchLatestFiles } from './api/supabase.js'
+import { normalizeFile } from './utils/format.js'
 import { ToastProvider } from './components/Toast.jsx'
-import Auth from './components/Auth.jsx'
-import ResetPassword from './components/ResetPassword.jsx'
 import Topbar from './components/Topbar.jsx'
 import Hero from './components/Hero.jsx'
 import Dashboard from './components/Dashboard.jsx'
@@ -13,35 +11,41 @@ import NewProjectModal from './components/NewProjectModal.jsx'
 import AIChat, { ChatFab } from './components/AIChat.jsx'
 import MOMWriter from './components/MOMWriter.jsx'
 
+// No login screen — every visitor is signed in as one shared account behind
+// the scenes so Supabase RLS (which requires an authenticated session) keeps
+// working. Activity/uploads all show up under this shared account.
+const SHARED_EMAIL = import.meta.env.VITE_SHARED_ACCOUNT_EMAIL
+const SHARED_PASSWORD = import.meta.env.VITE_SHARED_ACCOUNT_PASSWORD
+
 export default function App() {
   const [user, setUser] = useState(null)
-  const [authLoading, setAuthLoading] = useState(true)
-  // Check the URL hash synchronously on first render — the Supabase client's own
-  // hash processing is async and can resolve before this component's useEffect
-  // registers the onAuthStateChange listener, dropping the PASSWORD_RECOVERY event.
-  const [recoveryMode, setRecoveryMode] = useState(
-    () => typeof window !== 'undefined' && window.location.hash.includes('type=recovery')
-  )
+  const [authError, setAuthError] = useState(null)
 
   useEffect(() => {
+    // getCurrentUser() rejects (not resolves to null) when there's no session yet,
+    // e.g. a fresh browser — treat that as "not signed in", not a fatal error.
     getCurrentUser()
-      .then((u) => {
-        setUser(u)
-        setAuthLoading(false)
+      .catch(() => null)
+      .then((u) => u || signIn(SHARED_EMAIL, SHARED_PASSWORD).then((r) => r.user))
+      .then(setUser)
+      .catch((err) => {
+        console.error('shared sign-in failed:', err)
+        setAuthError(err.message || 'เข้าใช้งานระบบไม่สำเร็จ')
       })
-      .catch(() => setAuthLoading(false))
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'PASSWORD_RECOVERY') {
-        setRecoveryMode(true)
-      }
-      setUser(session?.user || null)
-    })
-
-    return () => authListener.subscription.unsubscribe()
   }, [])
 
-  if (authLoading) {
+  if (authError) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' }}>
+        <div>
+          <p>ไม่สามารถเชื่อมต่อระบบได้: {authError}</p>
+          <p className="muted small">ลองรีเฟรชหน้านี้ใหม่อีกครั้ง</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
         <div className="spinner"></div>
@@ -49,17 +53,9 @@ export default function App() {
     )
   }
 
-  if (recoveryMode) {
-    return (
-      <ToastProvider>
-        <ResetPassword onDone={() => setRecoveryMode(false)} />
-      </ToastProvider>
-    )
-  }
-
   return (
     <ToastProvider>
-      {user ? <MainApp user={user} /> : <Auth onRecoveryVerified={() => setRecoveryMode(true)} />}
+      <MainApp user={user} />
     </ToastProvider>
   )
 }

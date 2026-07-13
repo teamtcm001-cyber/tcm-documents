@@ -11,18 +11,8 @@ if (!supabaseUrl || !supabaseAnonKey) {
 export const supabase = createClient(supabaseUrl || '', supabaseAnonKey || '');
 
 // ============ AUTH ============
-export async function signUp(email, password, fullName) {
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: { full_name: fullName }
-    }
-  });
-  if (error) throw error;
-  return data;
-}
-
+// No login UI — App.jsx signs every visitor into one shared account on load
+// so RLS (which requires an authenticated session) keeps working.
 export async function signIn(email, password) {
   const { data, error } = await supabase.auth.signInWithPassword({
     email,
@@ -32,39 +22,10 @@ export async function signIn(email, password) {
   return data;
 }
 
-export async function signOut() {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
-}
-
 export async function getCurrentUser() {
   const { data: { user }, error } = await supabase.auth.getUser();
   if (error) throw error;
   return user;
-}
-
-export function onAuthStateChange(callback) {
-  return supabase.auth.onAuthStateChange(callback);
-}
-
-export async function resetPasswordForEmail(email) {
-  const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: window.location.origin,
-  });
-  if (error) throw error;
-}
-
-export async function updatePassword(newPassword) {
-  const { error } = await supabase.auth.updateUser({ password: newPassword });
-  if (error) throw error;
-}
-
-// Verify the 6-digit code emailed by resetPasswordForEmail — used instead of the
-// clickable link, which corporate email security scanners can pre-fetch and burn
-// (the link is single-use, so the real click then fails with "otp_expired").
-export async function verifyRecoveryOtp(email, token) {
-  const { error } = await supabase.auth.verifyOtp({ email, token, type: 'recovery' });
-  if (error) throw error;
 }
 
 // ============ PROJECTS ============
