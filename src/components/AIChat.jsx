@@ -7,12 +7,12 @@ import { searchFiles } from '../utils/aiSearch.js'
 import PreviewModal from './PreviewModal.jsx'
 
 // Call backend /api/chat for real Claude AI (if configured)
-async function callClaudeAPI(query, ctx) {
+async function callClaudeAPI(query, ctx, history) {
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, context: ctx }),
+      body: JSON.stringify({ query, context: ctx, history }),
     })
     if (!response.ok) throw new Error('API not OK')
     const data = await response.json()
@@ -29,7 +29,7 @@ export default function AIChat({ open, onClose }) {
     {
       role: 'bot',
       text:
-        'สวัสดีครับ ผมเป็น AI Document Agent ช่วยค้นหาเอกสาร, ดาวน์โหลดไฟล์, หรือตอบคำถามเกี่ยวกับโครงการของคุณได้ครับ\n\nลองถามได้หลากหลายแบบ:\n• "หา EIA ล่าสุดของ MRT-PP"\n• "ไฟล์ที่อัพโหลดเมื่อวาน"\n• "เอกสารใหญ่กว่า 5MB"\n• "มีโครงการอะไรบ้าง"',
+        'สวัสดีครับ ผมเป็น AI Document Agent ช่วยค้นหาเอกสาร, ดาวน์โหลดไฟล์, ตอบคำถามเกี่ยวกับโครงการของคุณ หรือตรวจสอบความครบถ้วนของเอกสารขออนุญาตก่อสร้างได้ครับ\n\nลองถามได้หลากหลายแบบ:\n• "หา EIA ล่าสุดของ MRT-PP"\n• "ไฟล์ที่อัพโหลดเมื่อวาน"\n• "เอกสารใหญ่กว่า 5MB"\n• "มีโครงการอะไรบ้าง"\n• "ช่วยตรวจสอบเอกสารขออนุญาตก่อสร้างให้หน่อย"',
     },
   ])
   const [input, setInput] = useState('')
@@ -78,8 +78,10 @@ export default function AIChat({ open, onClose }) {
     setMsgs((m) => [...m, { role: 'user', text }])
     setThinking(true)
 
-    // Try Claude API first (if configured)
-    let result = await callClaudeAPI(text, ctx)
+    // Try Claude API first (if configured) — send recent turns so multi-step
+    // conversations (e.g. the permit document checklist) keep context
+    const history = msgs.slice(-12).map((m) => ({ role: m.role, text: m.text }))
+    let result = await callClaudeAPI(text, ctx, history)
     let usedAI = 'local'
 
     if (!result) {
