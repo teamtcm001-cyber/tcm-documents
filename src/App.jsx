@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { supabase, getCurrentUser, signIn, fetchProjects, fetchLatestFiles } from './api/supabase.js'
 import { normalizeFile } from './utils/format.js'
+import { getLocalName } from './utils/localIdentity.js'
 import { ToastProvider } from './components/Toast.jsx'
+import NameGate from './components/NameGate.jsx'
 import Topbar from './components/Topbar.jsx'
 import Hero from './components/Hero.jsx'
 import Dashboard from './components/Dashboard.jsx'
@@ -20,6 +22,8 @@ const SHARED_PASSWORD = import.meta.env.VITE_SHARED_ACCOUNT_PASSWORD
 export default function App() {
   const [user, setUser] = useState(null)
   const [authError, setAuthError] = useState(null)
+  const [localName, setLocalNameState] = useState(() => getLocalName())
+  const [editingName, setEditingName] = useState(false)
 
   useEffect(() => {
     // getCurrentUser() rejects (not resolves to null) when there's no session yet,
@@ -53,14 +57,32 @@ export default function App() {
     )
   }
 
+  if (!localName || editingName) {
+    return (
+      <NameGate
+        initialValue={localName}
+        onDone={(n) => {
+          setLocalNameState(n)
+          setEditingName(false)
+        }}
+        onCancel={localName ? () => setEditingName(false) : undefined}
+      />
+    )
+  }
+
+  // Overlay the self-reported name onto the shared account's user object so
+  // every existing user_metadata.full_name read (Topbar, uploads, MOM) shows
+  // the real person instead of the shared account for everyone.
+  const displayUser = { ...user, user_metadata: { ...user.user_metadata, full_name: localName } }
+
   return (
     <ToastProvider>
-      <MainApp user={user} />
+      <MainApp user={displayUser} onChangeName={() => setEditingName(true)} />
     </ToastProvider>
   )
 }
 
-function MainApp({ user }) {
+function MainApp({ user, onChangeName }) {
   const [active, setActive] = useState('dashboard')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
@@ -140,6 +162,7 @@ function MainApp({ user }) {
         onOpenUpload={() => setUploadOpen(true)}
         onOpenChat={() => setChatOpen(true)}
         onOpenMOM={() => setMomOpen(true)}
+        onChangeName={onChangeName}
       />
 
       <Hero

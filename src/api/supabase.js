@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { uploadToDrive, driveFileUrl } from '../utils/googleDrive.js';
+import { getLocalName } from '../utils/localIdentity.js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -219,7 +220,7 @@ export async function logActivity(projectId, action, details, fileId = null) {
       details,
       file_id: fileId,
       user_id: user.id,
-      user_name: user.user_metadata?.full_name || user.email
+      user_name: getLocalName() || user.user_metadata?.full_name || user.email
     }]);
   if (error) throw error;
 }

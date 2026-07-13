@@ -1,6 +1,6 @@
 import Icon from './Icon.jsx'
 
-export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, onOpenMOM }) {
+export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, onOpenMOM, onChangeName }) {
   const initials = (() => {
     const n = user?.user_metadata?.full_name || user?.email || '?'
     return n.slice(0, 2).toUpperCase()
@@ -37,10 +37,15 @@ export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, 
         <button className="btn btn-sm btn-navy" onClick={onOpenUpload}>
           <Icon name="upload" size={15} /> อัปโหลด
         </button>
-        <div className="user-pill" title={user?.email}>
+        <button
+          className="user-pill"
+          style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+          title="แก้ไขชื่อ/รหัสพนักงาน"
+          onClick={onChangeName}
+        >
           <div className="avatar">{initials}</div>
           <span className="uname">{displayName}</span>
-        </div>
+        </button>
       </div>
     </header>
   )
