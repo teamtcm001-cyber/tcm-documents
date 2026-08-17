@@ -18,7 +18,10 @@ export const fmtDate = (d) => {
 }
 
 // Document type mapping: English DB key <-> Thai display label
-export const TYPE_KEYS = ['eia', 'drawing', 'contract', 'labor', 'standard', 'mom', 'boq', 'other']
+export const TYPE_KEYS = [
+  'eia', 'drawing', 'contract', 'labor', 'standard', 'mom', 'boq',
+  'tor', 'speclist', 'qa', 'cplan', 'bidbond', 'pq', 'other',
+]
 
 export const TYPE_LABEL = {
   eia: 'EIA',
@@ -27,7 +30,13 @@ export const TYPE_LABEL = {
   labor: 'แรงงาน',
   standard: 'มาตรฐาน',
   mom: 'MOM',
-  boq: 'ราคา',
+  boq: 'BOQ/วิเคราะห์ราคา',
+  tor: 'TOR',
+  speclist: 'รายการประกอบแบบ',
+  qa: 'Q&A/Addendum',
+  cplan: 'PLAN ผู้รับเหมา',
+  bidbond: 'ประกันราคา',
+  pq: 'PQ/รายชื่อผู้รับเหมา',
   other: 'อื่นๆ',
 }
 
@@ -39,6 +48,12 @@ export const TYPE_COLOR = {
   standard: '#0EA5E9',
   mom: '#EC4899',
   boq: '#DC2626',
+  tor: '#0D9488',
+  speclist: '#D97706',
+  qa: '#4F46E5',
+  cplan: '#92400E',
+  bidbond: '#E11D48',
+  pq: '#A855F7',
   other: '#6B7280',
 }
 
@@ -50,6 +65,12 @@ export const TYPE_BG = {
   standard: 'rgba(14,165,233,0.12)',
   mom: 'rgba(236,72,153,0.12)',
   boq: 'rgba(220,38,38,0.12)',
+  tor: 'rgba(13,148,136,0.12)',
+  speclist: 'rgba(217,119,6,0.14)',
+  qa: 'rgba(79,70,229,0.12)',
+  cplan: 'rgba(146,64,14,0.12)',
+  bidbond: 'rgba(225,29,72,0.12)',
+  pq: 'rgba(168,85,247,0.12)',
   other: 'rgba(107,114,128,0.12)',
 }
 
@@ -61,6 +82,12 @@ export const TYPE_TEXT = {
   standard: '#0284C7',
   mom: '#DB2777',
   boq: '#B91C1C',
+  tor: '#0F766E',
+  speclist: '#B45309',
+  qa: '#4338CA',
+  cplan: '#78350F',
+  bidbond: '#BE123C',
+  pq: '#9333EA',
   other: '#6B7280',
 }
 
@@ -68,11 +95,17 @@ export const TYPE_TEXT = {
 export const detectType = (filename) => {
   const f = (filename || '').toLowerCase()
   if (/eia|สิ่งแวดล้อม|environment|impact/.test(f)) return 'eia'
+  if (/\btor\b|ขอบเขตงาน|terms of reference|scope of work/.test(f)) return 'tor'
+  if (/รายการประกอบแบบ|bill of material|\bbom\b/.test(f)) return 'speclist'
+  if (/q&a|addendum|ถาม.?ตอบ/.test(f)) return 'qa'
+  if (/แบบผู้รับเหมา|shop\s*drawing|contractor.?s?\s*plan/.test(f)) return 'cplan'
   if (/แบบ|drawing|plan|dwg|blueprint|สถาปัตย์|โครงสร้าง/.test(f)) return 'drawing'
   if (/สัญญา|contract|agreement/.test(f)) return 'contract'
   if (/แรงงาน|labor|worker|safety|ปลอดภัย/.test(f)) return 'labor'
   if (/มยผ|มาตรฐาน|standard|spec/.test(f)) return 'standard'
   if (/mom|minutes|รายงานประชุม|meeting|ประชุม/.test(f)) return 'mom'
+  if (/ประกันราคา|bid\s*bond|หลักประกัน/.test(f)) return 'bidbond'
+  if (/\bpq\b|prequalification|รายชื่อผู้รับเหมา|project reference/.test(f)) return 'pq'
   if (/ราคา|boq|ประมาณการ|cost|budget/.test(f)) return 'boq'
   return 'other'
 }
