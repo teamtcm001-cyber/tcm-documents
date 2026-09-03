@@ -5,6 +5,7 @@ import { fetchFiles, uploadFile } from '../api/supabase.js'
 import { normalizeFile } from '../utils/format.js'
 import MOMTemplateModal from './MOMTemplateModal.jsx'
 import { getProjectTopics, getProjectLogo, getProjectFontStack } from '../utils/momDefaults.js'
+import { transcribeAudio } from '../utils/audioTranscribe.js'
 
 // ---------- helpers ----------
 const TH_MONTHS = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม']
@@ -291,6 +292,9 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
   const [sharingScreen, setSharingScreen] = useState(false)
   const [templateOpen, setTemplateOpen] = useState(false)
   const [screenshots, setScreenshots] = useState([])
+  const [hasBackupRecording, setHasBackupRecording] = useState(false)
+  const [retranscribing, setRetranscribing] = useState(false)
+  const [transcribeProgress, setTranscribeProgress] = useState(null)
 
   const timerRef = useRef(null)
   const recRef = useRef(null)
@@ -301,6 +305,9 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
   const baseRef = useRef('')
   const screenStreamRef = useRef(null)
   const screenVideoRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const recordedChunksRef = useRef([])
+  const recordedBlobRef = useRef(null)
 
   const proj = projId ? projects.find((p) => p.id === projId) : null
   const uploaderName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'ผู้ใช้'
@@ -503,6 +510,30 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
       return
     }
 
+    // Also record the raw audio alongside the live transcript — if the live
+    // speech recognition drops out or mishears things, this backup can be
+    // re-transcribed with Whisper afterward instead of losing the meeting.
+    recordedChunksRef.current = []
+    recordedBlobRef.current = null
+    setHasBackupRecording(false)
+    try {
+      const mr = new MediaRecorder(streamRef.current)
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data)
+      }
+      mr.onstop = () => {
+        if (recordedChunksRef.current.length) {
+          recordedBlobRef.current = new Blob(recordedChunksRef.current, { type: mr.mimeType || 'audio/webm' })
+          setHasBackupRecording(true)
+        }
+      }
+      mediaRecorderRef.current = mr
+      mr.start(1000)
+    } catch (e) {
+      console.warn('MediaRecorder backup unavailable:', e)
+      mediaRecorderRef.current = null
+    }
+
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) {
       setRecError('เบราว์เซอร์นี้ไม่รองรับการถอดเสียงสด — แนะนำ Google Chrome หรือใช้แท็บ "วางโน้ต"')
@@ -553,24 +584,70 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     recActiveRef.current = false
     setRecording(false)
     setInterim('')
-    teardownRecording()
-    setBars(Array(21).fill(8))
-    setTimeout(() => {
-      if ((baseRef.current || transcript).trim()) setStep(3)
-      else toast('ไม่ได้ยินเสียงพูด — ลองอัดใหม่ หรือใช้แท็บวางโน้ต', 'err')
-    }, 200)
+
+    const finalize = () => {
+      teardownRecording()
+      setBars(Array(21).fill(8))
+      setTimeout(() => {
+        if ((baseRef.current || transcript).trim()) setStep(3)
+        else toast('ไม่ได้ยินเสียงพูด — ลองอัดใหม่ หรือใช้แท็บวางโน้ต', 'err')
+      }, 200)
+    }
+
+    // Let the MediaRecorder flush its final chunk and assemble the backup
+    // blob (its own onstop handler does that) before we stop the tracks —
+    // stopping them first can cut the recording off mid-flush.
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.addEventListener('stop', finalize, { once: true })
+      mediaRecorderRef.current.stop()
+    } else {
+      finalize()
+    }
   }
 
-  const handleAudioFile = (e) => {
+  const handleAudioFile = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
     setTranscribing(true)
-    // NOTE: production should send `file` to a server-side STT (Whisper / Google STT).
-    // No STT backend is wired yet — ask the user to record live or paste notes instead.
-    setTimeout(() => {
+    setTranscribeProgress(null)
+    try {
+      const text = await transcribeAudio(file, (done, total) => setTranscribeProgress({ done, total }))
+      if (!text.trim()) {
+        toast('ไม่พบเสียงพูดในไฟล์นี้', 'err')
+        return
+      }
+      baseRef.current = text
+      setTranscript(text)
+      setStep(3)
+    } catch (err) {
+      console.error('audio file transcribe:', err)
+      toast('ถอดเสียงไม่สำเร็จ: ' + (err.message || 'ไม่ทราบสาเหตุ'), 'err')
+    } finally {
       setTranscribing(false)
-      toast('การถอดไฟล์เสียงทั้งไฟล์ยังไม่เปิดใช้งาน — กรุณาใช้แท็บ "อัดเสียง" หรือ "วางโน้ต" แทน', 'err')
-    }, 900)
+      setTranscribeProgress(null)
+    }
+  }
+
+  const retranscribeFromRecording = async () => {
+    if (!recordedBlobRef.current) return
+    setRetranscribing(true)
+    setTranscribeProgress(null)
+    try {
+      const text = await transcribeAudio(recordedBlobRef.current, (done, total) => setTranscribeProgress({ done, total }))
+      if (text.trim()) {
+        baseRef.current = text
+        setTranscript(text)
+        toast('ถอดเสียงใหม่ด้วย AI สำเร็จ — แม่นยำกว่าการถอดสด')
+      } else {
+        toast('ไม่พบเสียงพูดในไฟล์บันทึกสำรอง', 'err')
+      }
+    } catch (err) {
+      console.error('retranscribe from recording:', err)
+      toast('ถอดเสียงไม่สำเร็จ: ' + (err.message || 'ไม่ทราบสาเหตุ'), 'err')
+    } finally {
+      setRetranscribing(false)
+      setTranscribeProgress(null)
+    }
   }
 
   const generate = async () => {
@@ -735,7 +812,11 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
             <div className="mom-transcribing">
               <div className="spinner"></div>
               <div style={{ fontFamily: 'Prompt', fontWeight: 500, color: 'var(--navy)' }}>กำลังถอดเสียงเป็นข้อความ…</div>
-              <div style={{ fontSize: 13, color: 'var(--gray-500)' }}>แปลงเสียงภาษาไทยเป็น Transcript</div>
+              <div style={{ fontSize: 13, color: 'var(--gray-500)' }}>
+                {transcribeProgress
+                  ? `กำลังถอดเสียงช่วงที่ ${transcribeProgress.done}/${transcribeProgress.total}`
+                  : 'แปลงเสียงภาษาไทยเป็น Transcript'}
+              </div>
             </div>
           </div>
         ) : mode === 'record' ? (
@@ -793,7 +874,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
               <Icon name="sound" size={32} />
             </div>
             <div className="t">ลากไฟล์เสียงมาวาง หรือคลิกเลือก</div>
-            <div className="s">รองรับ MP3, WAV, M4A · ต้องต่อ Whisper/STT ก่อนใช้งานจริง (ยังไม่เปิดใช้)</div>
+            <div className="s">รองรับ MP3, WAV, M4A · ถอดเสียงด้วย AI (Whisper) รองรับไฟล์ยาวได้เป็นชั่วโมง</div>
           </label>
         )}
 
@@ -844,6 +925,21 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
         </p>
         <textarea className="mom-transcript" value={transcript} onChange={(e) => setTranscript(e.target.value)} />
         <div className="mom-textcount">{transcript.length} ตัวอักษร</div>
+        {hasBackupRecording && (
+          <div className="mom-share-bar" style={{ marginTop: 10 }}>
+            <div className="lbl">
+              <Icon name="sound" size={14} style={{ verticalAlign: -2 }} /> มีไฟล์เสียงที่อัดสำรองไว้ — ถ้าถอดสดไม่ครบหรือหลุดกลางคัน ลองถอดใหม่ด้วย AI ได้
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={retranscribeFromRecording} disabled={retranscribing}>
+              <Icon name="bolt" size={14} />
+              {retranscribing
+                ? transcribeProgress
+                  ? `กำลังถอด ${transcribeProgress.done}/${transcribeProgress.total}...`
+                  : 'กำลังถอดเสียง...'
+                : 'ถอดเสียงซ้ำด้วย AI'}
+            </button>
+          </div>
+        )}
         <div className="mom-glossary" style={{ marginTop: 16 }}>
           <div className="h">
             <Icon name="sparkles" size={14} /> ศัพท์เฉพาะของโครงการ {proj.code} ที่ AI จะรู้จัก
