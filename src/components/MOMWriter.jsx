@@ -869,12 +869,15 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
           </div>
         ) : (
           <label className="dropzone" style={{ display: 'block' }}>
-            <input type="file" accept="audio/*" style={{ display: 'none' }} onChange={handleAudioFile} />
+            <input type="file" accept="audio/*,video/*" style={{ display: 'none' }} onChange={handleAudioFile} />
             <div className="ic">
               <Icon name="sound" size={32} />
             </div>
-            <div className="t">ลากไฟล์เสียงมาวาง หรือคลิกเลือก</div>
-            <div className="s">รองรับ MP3, WAV, M4A · ถอดเสียงด้วย AI (Whisper) รองรับไฟล์ยาวได้เป็นชั่วโมง</div>
+            <div className="t">ลากไฟล์เสียง/วิดีโอมาวาง หรือคลิกเลือก</div>
+            <div className="s">
+              รองรับ MP3, WAV, M4A, MP4 (เช่นไฟล์ Cloud Recording จาก Zoom/Teams — ระบบจะดึงเฉพาะเสียงไปถอดให้) · ถอดเสียงด้วย AI
+              (Whisper) รองรับไฟล์ยาวได้เป็นชั่วโมง
+            </div>
           </label>
         )}
 

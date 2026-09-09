@@ -17,6 +17,10 @@ async function decodeToMonoPCM(blob) {
   let decoded
   try {
     decoded = await ctx.decodeAudioData(arrayBuffer)
+  } catch (e) {
+    throw new Error(
+      'เบราว์เซอร์นี้เปิดไฟล์นี้ไม่ได้ (มักเกิดกับไฟล์วิดีโอบางชนิด) — ลองใช้ Google Chrome หรือดาวน์โหลดแบบ "Audio only" จาก Zoom/Teams แทน'
+    )
   } finally {
     ctx.close()
   }
