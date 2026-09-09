@@ -5,7 +5,7 @@ import { fetchFiles, uploadFile } from '../api/supabase.js'
 import { normalizeFile } from '../utils/format.js'
 import MOMTemplateModal from './MOMTemplateModal.jsx'
 import { getProjectTopics, getProjectLogo, getProjectFontStack } from '../utils/momDefaults.js'
-import { transcribeAudio } from '../utils/audioTranscribe.js'
+import { transcribeLocally } from '../utils/localWhisper.js'
 
 // ---------- helpers ----------
 const TH_MONTHS = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม']
@@ -252,6 +252,17 @@ ${transcript}
   "attendees": ["ชื่อ (ชื่อเล่น)", "..."],
 ${schemaFields}
 }`
+}
+
+// Turns the { phase, progress } status from transcribeLocally() into a Thai label.
+function describeTranscribeStatus(status) {
+  if (!status) return 'แปลงเสียงภาษาไทยเป็น Transcript'
+  if (status.phase === 'loading-model') {
+    return `กำลังโหลดโมเดลถอดเสียง (ครั้งแรกอาจใช้เวลาสักครู่)${status.progress ? ` — ${status.progress}%` : ''}`
+  }
+  if (status.phase === 'decoding') return 'กำลังเตรียมไฟล์เสียง…'
+  if (status.phase === 'transcribing') return 'กำลังถอดเสียงในเครื่อง — อาจใช้เวลานานกว่าปกติ'
+  return 'แปลงเสียงภาษาไทยเป็น Transcript'
 }
 
 async function callMOMAPI(prompt) {
@@ -611,7 +622,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     setTranscribing(true)
     setTranscribeProgress(null)
     try {
-      const text = await transcribeAudio(file, (done, total) => setTranscribeProgress({ done, total }))
+      const text = await transcribeLocally(file, setTranscribeProgress)
       if (!text.trim()) {
         toast('ไม่พบเสียงพูดในไฟล์นี้', 'err')
         return
@@ -633,7 +644,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     setRetranscribing(true)
     setTranscribeProgress(null)
     try {
-      const text = await transcribeAudio(recordedBlobRef.current, (done, total) => setTranscribeProgress({ done, total }))
+      const text = await transcribeLocally(recordedBlobRef.current, setTranscribeProgress)
       if (text.trim()) {
         baseRef.current = text
         setTranscript(text)
@@ -812,11 +823,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
             <div className="mom-transcribing">
               <div className="spinner"></div>
               <div style={{ fontFamily: 'Prompt', fontWeight: 500, color: 'var(--navy)' }}>กำลังถอดเสียงเป็นข้อความ…</div>
-              <div style={{ fontSize: 13, color: 'var(--gray-500)' }}>
-                {transcribeProgress
-                  ? `กำลังถอดเสียงช่วงที่ ${transcribeProgress.done}/${transcribeProgress.total}`
-                  : 'แปลงเสียงภาษาไทยเป็น Transcript'}
-              </div>
+              <div style={{ fontSize: 13, color: 'var(--gray-500)' }}>{describeTranscribeStatus(transcribeProgress)}</div>
             </div>
           </div>
         ) : mode === 'record' ? (
@@ -875,8 +882,8 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
             </div>
             <div className="t">ลากไฟล์เสียง/วิดีโอมาวาง หรือคลิกเลือก</div>
             <div className="s">
-              รองรับ MP3, WAV, M4A, MP4 (เช่นไฟล์ Cloud Recording จาก Zoom/Teams — ระบบจะดึงเฉพาะเสียงไปถอดให้) · ถอดเสียงด้วย AI
-              (Whisper) รองรับไฟล์ยาวได้เป็นชั่วโมง
+              รองรับ MP3, WAV, M4A, MP4 (เช่นไฟล์ Cloud Recording จาก Zoom/Teams — ระบบจะดึงเฉพาะเสียงไปถอดให้) · ถอดเสียงในเครื่องคุณเอง
+              ฟรี ไม่ส่งไฟล์ขึ้นเซิร์ฟเวอร์ · ไฟล์ยาวอาจใช้เวลาถอดนานกว่าปกติ
             </div>
           </label>
         )}
@@ -935,11 +942,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
             </div>
             <button className="btn btn-ghost btn-sm" onClick={retranscribeFromRecording} disabled={retranscribing}>
               <Icon name="bolt" size={14} />
-              {retranscribing
-                ? transcribeProgress
-                  ? `กำลังถอด ${transcribeProgress.done}/${transcribeProgress.total}...`
-                  : 'กำลังถอดเสียง...'
-                : 'ถอดเสียงซ้ำด้วย AI'}
+              {retranscribing ? describeTranscribeStatus(transcribeProgress) : 'ถอดเสียงซ้ำด้วย AI'}
             </button>
           </div>
         )}
