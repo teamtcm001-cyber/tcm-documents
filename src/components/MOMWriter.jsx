@@ -260,7 +260,9 @@ function describeTranscribeStatus(status) {
   if (status.phase === 'loading-model') {
     return `กำลังโหลดโมเดลถอดเสียง (ครั้งแรกอาจใช้เวลาสักครู่)${status.progress ? ` — ${status.progress}%` : ''}`
   }
-  if (status.phase === 'decoding') return 'กำลังเตรียมไฟล์เสียง…'
+  if (status.phase === 'decoding') {
+    return `กำลังเตรียมไฟล์เสียง…${typeof status.progress === 'number' ? ` — ${status.progress}%` : ''}`
+  }
   if (status.phase === 'transcribing') return 'กำลังถอดเสียงในเครื่อง — อาจใช้เวลานานกว่าปกติ'
   return 'แปลงเสียงภาษาไทยเป็น Transcript'
 }
