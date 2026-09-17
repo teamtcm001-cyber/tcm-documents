@@ -326,6 +326,23 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
   const [hasBackupRecording, setHasBackupRecording] = useState(false)
   const [retranscribing, setRetranscribing] = useState(false)
   const [transcribeProgress, setTranscribeProgress] = useState(null)
+  // Faster-but-less-accurate local transcription opt-in (whisper-tiny vs the
+  // default whisper-base) — persisted across sessions so the user doesn't
+  // have to re-toggle it every time; defaults to off (accuracy-first) for
+  // anyone who's never touched it.
+  const [fastTranscribe, setFastTranscribeState] = useState(() => {
+    try {
+      return localStorage.getItem('tcm_fast_transcribe') === '1'
+    } catch {
+      return false
+    }
+  })
+  const setFastTranscribe = (value) => {
+    setFastTranscribeState(value)
+    try {
+      localStorage.setItem('tcm_fast_transcribe', value ? '1' : '0')
+    } catch {}
+  }
 
   const timerRef = useRef(null)
   const recRef = useRef(null)
@@ -648,10 +665,12 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
   // if found, asks the user whether to pick up where it left off. Returns
   // the `resume` flag to pass into transcribeLocally. `keyOverride` must be
   // passed for plain-Blob sources (live recordings) — see
-  // recordingSessionKeyRef / transcribeLocally's keyOverride option.
-  const resolveResumeOption = async (blob, keyOverride) => {
+  // recordingSessionKeyRef / transcribeLocally's keyOverride option. `fast`
+  // must match what will be passed to transcribeLocally so a record left by
+  // a run with the other model isn't offered as resumable here.
+  const resolveResumeOption = async (blob, keyOverride, fast) => {
     try {
-      const resumable = await checkResumableTranscription(blob, keyOverride)
+      const resumable = await checkResumableTranscription(blob, keyOverride, { fast })
       if (!resumable) return true
       const wantsResume = window.confirm(
         `พบการถอดเสียงที่ค้างไว้ (ถอดไปแล้วประมาณ ${fmtThaiDuration(resumable.approxSecondsDone)}) ต้องการทำต่อจากจุดที่ค้างไว้หรือไม่?\n\nตกลง = ทำต่อ · ยกเลิก = เริ่มถอดเสียงใหม่ทั้งหมด`
@@ -669,11 +688,11 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     if (!file) return
     // Real uploaded Files have a stable name+lastModified, so no keyOverride
     // is needed here — only the in-memory recorded Blob path needs one.
-    const resume = await resolveResumeOption(file)
+    const resume = await resolveResumeOption(file, undefined, fastTranscribe)
     setTranscribing(true)
     setTranscribeProgress(null)
     try {
-      const text = await transcribeLocally(file, setTranscribeProgress, { resume })
+      const text = await transcribeLocally(file, setTranscribeProgress, { resume, fast: fastTranscribe })
       if (!text.trim()) {
         toast('ไม่พบเสียงพูดในไฟล์นี้', 'err')
         return
@@ -696,11 +715,11 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     // this recording session's unique id as the resume key so it can never
     // collide with a different recording of similar size.
     const keyOverride = recordingSessionKeyRef.current
-    const resume = await resolveResumeOption(recordedBlobRef.current, keyOverride)
+    const resume = await resolveResumeOption(recordedBlobRef.current, keyOverride, fastTranscribe)
     setRetranscribing(true)
     setTranscribeProgress(null)
     try {
-      const text = await transcribeLocally(recordedBlobRef.current, setTranscribeProgress, { resume, keyOverride })
+      const text = await transcribeLocally(recordedBlobRef.current, setTranscribeProgress, { resume, keyOverride, fast: fastTranscribe })
       if (text.trim()) {
         baseRef.current = text
         setTranscript(text)
@@ -951,17 +970,23 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
             <div className="mom-textcount">{transcript.length} ตัวอักษร</div>
           </div>
         ) : (
-          <label className="dropzone" style={{ display: 'block' }}>
-            <input type="file" accept="audio/*,video/*" style={{ display: 'none' }} onChange={handleAudioFile} />
-            <div className="ic">
-              <Icon name="sound" size={32} />
-            </div>
-            <div className="t">ลากไฟล์เสียง/วิดีโอมาวาง หรือคลิกเลือก</div>
-            <div className="s">
-              รองรับ MP3, WAV, M4A, MP4 (เช่นไฟล์ Cloud Recording จาก Zoom/Teams — ระบบจะดึงเฉพาะเสียงไปถอดให้) · ถอดเสียงในเครื่องคุณเอง
-              ฟรี ไม่ส่งไฟล์ขึ้นเซิร์ฟเวอร์ · ไฟล์ยาวอาจใช้เวลาถอดนานกว่าปกติ
-            </div>
-          </label>
+          <>
+            <label className="mom-fast-toggle" style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, marginBottom: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={fastTranscribe} onChange={(e) => setFastTranscribe(e.target.checked)} />
+              ถอดเสียงเร็วขึ้น (แม่นยำน้อยลงเล็กน้อย) — แนะนำสำหรับไฟล์ยาวมาก
+            </label>
+            <label className="dropzone" style={{ display: 'block' }}>
+              <input type="file" accept="audio/*,video/*" style={{ display: 'none' }} onChange={handleAudioFile} />
+              <div className="ic">
+                <Icon name="sound" size={32} />
+              </div>
+              <div className="t">ลากไฟล์เสียง/วิดีโอมาวาง หรือคลิกเลือก</div>
+              <div className="s">
+                รองรับ MP3, WAV, M4A, MP4 (เช่นไฟล์ Cloud Recording จาก Zoom/Teams — ระบบจะดึงเฉพาะเสียงไปถอดให้) · ถอดเสียงในเครื่องคุณเอง
+                ฟรี ไม่ส่งไฟล์ขึ้นเซิร์ฟเวอร์ · ไฟล์ยาวอาจใช้เวลาถอดนานกว่าปกติ
+              </div>
+            </label>
+          </>
         )}
 
         <div className="mom-share-bar">
@@ -1012,10 +1037,14 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
         <textarea className="mom-transcript" value={transcript} onChange={(e) => setTranscript(e.target.value)} />
         <div className="mom-textcount">{transcript.length} ตัวอักษร</div>
         {hasBackupRecording && (
-          <div className="mom-share-bar" style={{ marginTop: 10 }}>
+          <div className="mom-share-bar" style={{ marginTop: 10, flexWrap: 'wrap' }}>
             <div className="lbl">
               <Icon name="sound" size={14} style={{ verticalAlign: -2 }} /> มีไฟล์เสียงที่อัดสำรองไว้ — ถ้าถอดสดไม่ครบหรือหลุดกลางคัน ลองถอดใหม่ด้วย AI ได้
             </div>
+            <label className="mom-fast-toggle" style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13 }}>
+              <input type="checkbox" checked={fastTranscribe} onChange={(e) => setFastTranscribe(e.target.checked)} />
+              ถอดเสียงเร็วขึ้น (แม่นยำน้อยลงเล็กน้อย) — แนะนำสำหรับไฟล์ยาวมาก
+            </label>
             <button className="btn btn-ghost btn-sm" onClick={retranscribeFromRecording} disabled={retranscribing}>
               <Icon name="bolt" size={14} />
               {retranscribing ? describeTranscribeStatus(transcribeProgress) : 'ถอดเสียงซ้ำด้วย AI'}

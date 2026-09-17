@@ -6,22 +6,48 @@
 // because the team doesn't want to attach a payment method to any AI
 // provider for this feature.
 
-let transcriberPromise = null
+// Default (current, unchanged) model. Accurate, but slower on long
+// recordings. `whisper-tiny` is offered as an explicit opt-in for users who
+// want faster turnaround on very long files and are OK with a small accuracy
+// hit (see options.fast on transcribeLocally() below) — per tools-advisor
+// research, multi-threading is not worth the site-wide COOP/COEP header risk
+// to Supabase Storage links / the PDF.js CDN worker, so a smaller model is
+// the only realistic speed lever available.
+const DEFAULT_MODEL = 'Xenova/whisper-base'
+const FAST_MODEL = 'Xenova/whisper-tiny'
 
-function getTranscriber(onModelProgress) {
-  if (!transcriberPromise) {
-    transcriberPromise = import('@xenova/transformers').then(({ pipeline, env }) => {
-      // Without this, the library checks a local "/models/" path first — which
-      // doesn't exist on this app's server, and a dev/prod SPA fallback returns
-      // index.html for it, which then fails to parse as the JSON/model file it
-      // expected. Force it straight to the Hugging Face Hub instead.
-      env.allowLocalModels = false
-      return pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
-        progress_callback: onModelProgress,
+// Resolves the { fast, model } shape used by both transcribeLocally() and
+// checkResumableTranscription() into one concrete model id, so both call
+// sites agree on what "the requested model" means.
+function resolveModelName(options = {}) {
+  if (options.model) return options.model
+  return options.fast ? FAST_MODEL : DEFAULT_MODEL
+}
+
+// Keyed by model id so switching models mid-session (e.g. one file
+// transcribed with `base`, another with `tiny`) reuses whichever pipeline is
+// already cached instead of reloading it, and never cross-contaminates: a
+// cached `tiny` pipeline is never handed back for a `base` request or vice
+// versa.
+const transcriberPromises = new Map()
+
+function getTranscriber(onModelProgress, model = DEFAULT_MODEL) {
+  if (!transcriberPromises.has(model)) {
+    transcriberPromises.set(
+      model,
+      import('@xenova/transformers').then(({ pipeline, env }) => {
+        // Without this, the library checks a local "/models/" path first — which
+        // doesn't exist on this app's server, and a dev/prod SPA fallback returns
+        // index.html for it, which then fails to parse as the JSON/model file it
+        // expected. Force it straight to the Hugging Face Hub instead.
+        env.allowLocalModels = false
+        return pipeline('automatic-speech-recognition', model, {
+          progress_callback: onModelProgress,
+        })
       })
-    })
+    )
   }
-  return transcriberPromise
+  return transcriberPromises.get(model)
 }
 
 // How much decoded audio to accumulate before resampling it down to 16kHz
@@ -213,16 +239,24 @@ function computeFileKey(blob, keyOverride) {
 //
 // `keyOverride` must be passed for plain-Blob sources (live recordings) —
 // see computeFileKey().
-export async function checkResumableTranscription(blob, keyOverride) {
+// `options.fast`/`options.model` should match whatever will be passed to the
+// eventual transcribeLocally() call, so a record left behind by a `base` run
+// isn't offered as resumable for a `tiny` run (or vice versa) — see the
+// model-mismatch check below.
+export async function checkResumableTranscription(blob, keyOverride, options = {}) {
   sweepOldProgressRecords() // best-effort, not awaited — housekeeping only
   const fileKey = computeFileKey(blob, keyOverride)
   const record = await idbGet(fileKey)
   if (!record || record.completed || !Array.isArray(record.chunks)) return null
-  if (record.schemaVersion !== PROGRESS_SCHEMA_VERSION) {
-    // The chunking scheme changed since this record was saved (e.g. an app
-    // deploy landed while this recording sat half-transcribed in a tab) —
-    // chunk index `i` may no longer mean the same ~30s window, so splicing
-    // it in would risk silently wrong text. Discard and treat as fresh.
+  const requestedModel = resolveModelName(options)
+  const recordModel = record.model || DEFAULT_MODEL // older records predate this field — they're always `base`
+  if (record.schemaVersion !== PROGRESS_SCHEMA_VERSION || recordModel !== requestedModel) {
+    // Either the chunking scheme changed since this record was saved (e.g.
+    // an app deploy landed while this recording sat half-transcribed in a
+    // tab), or it was started with a different model than what's now being
+    // requested (user flipped the fast-transcribe toggle between runs). In
+    // both cases chunk `i`'s saved text may not be safe to splice into this
+    // run — discard and treat as fresh rather than risk wrong text.
     await idbDelete(fileKey)
     return null
   }
@@ -296,7 +330,7 @@ function markAsSetupFailure(error) {
 // appends the resulting text, saves progress to IndexedDB, and reports
 // streaming status (progress %, partial transcript, ETA) via onStatus.
 // ---------------------------------------------------------------------------
-function createChunkRunner({ transcriber, fileKey, resume, onStatus }) {
+function createChunkRunner({ transcriber, fileKey, resume, onStatus, model }) {
   let chunkIndex = 0
   let carry = null
   const texts = []
@@ -308,13 +342,18 @@ function createChunkRunner({ transcriber, fileKey, resume, onStatus }) {
     if (resume) {
       const record = await idbGet(fileKey)
       const versionMatches = record && record.schemaVersion === PROGRESS_SCHEMA_VERSION
-      if (record && !record.completed && Array.isArray(record.chunks) && versionMatches) {
+      const recordModel = record ? record.model || DEFAULT_MODEL : null
+      const modelMatches = recordModel === model
+      if (record && !record.completed && Array.isArray(record.chunks) && versionMatches && modelMatches) {
         record.chunks.forEach((text, i) => {
           if (typeof text === 'string') resumedTexts.set(i, text)
         })
-      } else if (record && !versionMatches) {
-        // Stale schema (see PROGRESS_SCHEMA_VERSION) — can't safely resume
-        // from it, discard rather than risk splicing misaligned text.
+      } else if (record && (!versionMatches || !modelMatches)) {
+        // Stale schema (see PROGRESS_SCHEMA_VERSION), or saved by a different
+        // model than the one being requested now (user flipped the
+        // fast-transcribe toggle between the interrupted run and this
+        // resume) — can't safely resume from it, discard rather than risk
+        // splicing misaligned/mismatched text.
         await idbDelete(fileKey)
       }
     } else {
@@ -391,7 +430,7 @@ function createChunkRunner({ transcriber, fileKey, resume, onStatus }) {
     // Persist progress after every chunk so an interrupted run (crash, tab
     // close, accidental navigation) can resume instead of starting a
     // multi-hour transcription over from scratch.
-    await idbPut({ fileKey, chunks: texts.slice(), completed: false, schemaVersion: PROGRESS_SCHEMA_VERSION, updatedAt: Date.now() })
+    await idbPut({ fileKey, chunks: texts.slice(), completed: false, schemaVersion: PROGRESS_SCHEMA_VERSION, model, updatedAt: Date.now() })
 
     onStatus?.({ phase: 'transcribing', progress: baseProgress, partialText: partialText(), etaSeconds, chunkIndex: index, totalChunks })
   }
@@ -588,8 +627,16 @@ async function transcribeAudio(blob, onStatus, runner) {
 // options.keyOverride: required for plain-Blob sources that don't carry
 // stable name/lastModified (e.g. a live MediaRecorder backup recording) —
 // see computeFileKey(). Not needed for real uploaded Files.
+// options.fast (default false): use the smaller/faster `Xenova/whisper-tiny`
+// model instead of the default `Xenova/whisper-base` — roughly 2x faster,
+// meaningfully less accurate (especially for Thai), so it's an explicit
+// opt-in surfaced as a toggle in MOMWriter, never a silent default.
+// options.model: escape hatch to name an exact model id directly; takes
+// precedence over options.fast if both are given. Most callers should just
+// use options.fast.
 export async function transcribeLocally(blob, onStatus, options = {}) {
   const { resume = true, keyOverride } = options
+  const model = resolveModelName(options)
 
   sweepOldProgressRecords() // best-effort, not awaited — housekeeping only
 
@@ -598,10 +645,10 @@ export async function transcribeLocally(blob, onStatus, options = {}) {
     if (p.status === 'progress') {
       onStatus?.({ phase: 'loading-model', progress: Math.round(p.progress || 0) })
     }
-  })
+  }, model)
 
   const fileKey = computeFileKey(blob, keyOverride)
-  const runner = createChunkRunner({ transcriber, fileKey, resume, onStatus })
+  const runner = createChunkRunner({ transcriber, fileKey, resume, onStatus, model })
   await runner.init()
 
   onStatus?.({ phase: 'decoding', progress: 0 })
