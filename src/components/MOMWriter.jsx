@@ -5,7 +5,7 @@ import { fetchFiles, uploadFile } from '../api/supabase.js'
 import { normalizeFile } from '../utils/format.js'
 import MOMTemplateModal from './MOMTemplateModal.jsx'
 import { getProjectTopics, getProjectLogo, getProjectFontStack } from '../utils/momDefaults.js'
-import { transcribeLocally } from '../utils/localWhisper.js'
+import { transcribeLocally, checkResumableTranscription, discardResumableTranscription } from '../utils/localWhisper.js'
 
 // ---------- helpers ----------
 const TH_MONTHS = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม']
@@ -33,6 +33,17 @@ const fmtMMSS = (sec) => {
   const m = String(Math.floor(sec / 60)).padStart(2, '0')
   const s = String(sec % 60).padStart(2, '0')
   return `${m}:${s}`
+}
+
+// "2 ชม. 14 นาที" / "8 นาที" style duration, used for ETA and for the resume
+// prompt's "งานค้างไว้ประมาณ ..." estimate.
+const fmtThaiDuration = (totalSeconds) => {
+  const s = Math.max(0, Math.round(totalSeconds || 0))
+  const h = Math.floor(s / 3600)
+  const m = Math.round((s % 3600) / 60)
+  if (h > 0) return `${h} ชม.${m > 0 ? ` ${m} นาที` : ''}`
+  if (m > 0) return `${m} นาที`
+  return 'ไม่ถึงนาที'
 }
 
 const nextMeetingNo = (files) => {
@@ -254,7 +265,8 @@ ${schemaFields}
 }`
 }
 
-// Turns the { phase, progress } status from transcribeLocally() into a Thai label.
+// Turns the streaming { phase, progress, partialText, etaSeconds, ... }
+// status from transcribeLocally() into a Thai label.
 function describeTranscribeStatus(status) {
   if (!status) return 'แปลงเสียงภาษาไทยเป็น Transcript'
   if (status.phase === 'loading-model') {
@@ -263,7 +275,13 @@ function describeTranscribeStatus(status) {
   if (status.phase === 'decoding') {
     return `กำลังเตรียมไฟล์เสียง…${typeof status.progress === 'number' ? ` — ${status.progress}%` : ''}`
   }
-  if (status.phase === 'transcribing') return 'กำลังถอดเสียงในเครื่อง — อาจใช้เวลานานกว่าปกติ'
+  if (status.phase === 'transcribing') {
+    const parts = ['กำลังถอดเสียงในเครื่อง']
+    if (typeof status.progress === 'number') parts.push(`${status.progress}%`)
+    if (typeof status.etaSeconds === 'number') parts.push(`เหลือประมาณ ${fmtThaiDuration(status.etaSeconds)}`)
+    if (parts.length === 1) parts.push('อาจใช้เวลานานกว่าปกติ')
+    return parts.join(' — ')
+  }
   return 'แปลงเสียงภาษาไทยเป็น Transcript'
 }
 
@@ -321,6 +339,12 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
   const mediaRecorderRef = useRef(null)
   const recordedChunksRef = useRef([])
   const recordedBlobRef = useRef(null)
+  // recordedBlobRef holds a plain Blob (from MediaRecorder), not a File —
+  // it has no name/lastModified, so a size-based transcription-resume key
+  // could collide between two different recordings of similar length. Mint
+  // a fresh unique id per recording session and use it as an explicit
+  // resume-key override instead (see transcribeLocally's keyOverride option).
+  const recordingSessionKeyRef = useRef(null)
 
   const proj = projId ? projects.find((p) => p.id === projId) : null
   const uploaderName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'ผู้ใช้'
@@ -528,6 +552,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     // re-transcribed with Whisper afterward instead of losing the meeting.
     recordedChunksRef.current = []
     recordedBlobRef.current = null
+    recordingSessionKeyRef.current = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`
     setHasBackupRecording(false)
     try {
       const mr = new MediaRecorder(streamRef.current)
@@ -618,13 +643,37 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
     }
   }
 
+  // Checks IndexedDB for a transcription of this exact file left over from
+  // an earlier interrupted run (tab crash, accidental navigation, etc.) and,
+  // if found, asks the user whether to pick up where it left off. Returns
+  // the `resume` flag to pass into transcribeLocally. `keyOverride` must be
+  // passed for plain-Blob sources (live recordings) — see
+  // recordingSessionKeyRef / transcribeLocally's keyOverride option.
+  const resolveResumeOption = async (blob, keyOverride) => {
+    try {
+      const resumable = await checkResumableTranscription(blob, keyOverride)
+      if (!resumable) return true
+      const wantsResume = window.confirm(
+        `พบการถอดเสียงที่ค้างไว้ (ถอดไปแล้วประมาณ ${fmtThaiDuration(resumable.approxSecondsDone)}) ต้องการทำต่อจากจุดที่ค้างไว้หรือไม่?\n\nตกลง = ทำต่อ · ยกเลิก = เริ่มถอดเสียงใหม่ทั้งหมด`
+      )
+      if (!wantsResume) await discardResumableTranscription(blob, keyOverride)
+      return wantsResume
+    } catch (err) {
+      console.warn('check resumable transcription failed:', err)
+      return true
+    }
+  }
+
   const handleAudioFile = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
+    // Real uploaded Files have a stable name+lastModified, so no keyOverride
+    // is needed here — only the in-memory recorded Blob path needs one.
+    const resume = await resolveResumeOption(file)
     setTranscribing(true)
     setTranscribeProgress(null)
     try {
-      const text = await transcribeLocally(file, setTranscribeProgress)
+      const text = await transcribeLocally(file, setTranscribeProgress, { resume })
       if (!text.trim()) {
         toast('ไม่พบเสียงพูดในไฟล์นี้', 'err')
         return
@@ -634,7 +683,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
       setStep(3)
     } catch (err) {
       console.error('audio file transcribe:', err)
-      toast('ถอดเสียงไม่สำเร็จ: ' + (err.message || 'ไม่ทราบสาเหตุ'), 'err')
+      toast('ถอดเสียงไม่สำเร็จ: ' + (err.message || 'ไม่ทราบสาเหตุ') + ' — งานที่ถอดไว้แล้วถูกบันทึกไว้ ลองอัปโหลดไฟล์เดิมซ้ำเพื่อทำต่อได้', 'err')
     } finally {
       setTranscribing(false)
       setTranscribeProgress(null)
@@ -643,10 +692,15 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
 
   const retranscribeFromRecording = async () => {
     if (!recordedBlobRef.current) return
+    // recordedBlobRef.current is a plain Blob (no name/lastModified) — use
+    // this recording session's unique id as the resume key so it can never
+    // collide with a different recording of similar size.
+    const keyOverride = recordingSessionKeyRef.current
+    const resume = await resolveResumeOption(recordedBlobRef.current, keyOverride)
     setRetranscribing(true)
     setTranscribeProgress(null)
     try {
-      const text = await transcribeLocally(recordedBlobRef.current, setTranscribeProgress)
+      const text = await transcribeLocally(recordedBlobRef.current, setTranscribeProgress, { resume, keyOverride })
       if (text.trim()) {
         baseRef.current = text
         setTranscript(text)
@@ -656,7 +710,7 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
       }
     } catch (err) {
       console.error('retranscribe from recording:', err)
-      toast('ถอดเสียงไม่สำเร็จ: ' + (err.message || 'ไม่ทราบสาเหตุ'), 'err')
+      toast('ถอดเสียงไม่สำเร็จ: ' + (err.message || 'ไม่ทราบสาเหตุ') + ' — งานที่ถอดไว้แล้วถูกบันทึกไว้ กดปุ่มนี้ซ้ำเพื่อทำต่อได้', 'err')
     } finally {
       setRetranscribing(false)
       setTranscribeProgress(null)
@@ -826,6 +880,26 @@ export default function MOMWriter({ projects, user, onClose, onSaved }) {
               <div className="spinner"></div>
               <div style={{ fontFamily: 'Prompt', fontWeight: 500, color: 'var(--navy)' }}>กำลังถอดเสียงเป็นข้อความ…</div>
               <div style={{ fontSize: 13, color: 'var(--gray-500)' }}>{describeTranscribeStatus(transcribeProgress)}</div>
+              {transcribeProgress?.partialText ? (
+                <div
+                  style={{
+                    marginTop: 10,
+                    maxHeight: 110,
+                    overflowY: 'auto',
+                    width: '100%',
+                    textAlign: 'left',
+                    fontSize: 12.5,
+                    lineHeight: 1.6,
+                    color: 'var(--gray-700)',
+                    background: 'var(--gray-100)',
+                    border: '1px solid var(--gray-200)',
+                    borderRadius: 8,
+                    padding: '8px 10px',
+                  }}
+                >
+                  {transcribeProgress.partialText}
+                </div>
+              ) : null}
             </div>
           </div>
         ) : mode === 'record' ? (
