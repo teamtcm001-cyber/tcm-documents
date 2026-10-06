@@ -5,15 +5,19 @@ import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLO
 
 function StatCards({ projects, files }) {
   const latestCount = files.filter((f) => f.isLatest).length
-  const last7 = files.filter((f) => (Date.now() - new Date(f.date)) / 86400000 <= 7).length
+  const ageDays = (d) => (Date.now() - new Date(d)) / 86400000
+  const last7 = files.filter((f) => ageDays(f.date) <= 7).length
+  const prev7 = files.filter((f) => ageDays(f.date) > 7 && ageDays(f.date) <= 14).length
+  const newProjects30 = projects.filter((p) => p.created_at && ageDays(p.created_at) <= 30).length
   const totalKB = files.reduce((s, f) => s + (f.size || 0), 0)
   const totalGB = (totalKB / 1024 / 1024).toFixed(1)
 
+  // Every note below is computed from the loaded data (nothing hardcoded).
   const cards = [
-    { lbl: 'โครงการทั้งหมด', val: projects.length, suf: 'โครงการ', trend: '+1 เดือนนี้', icon: 'building', color: '#3A6EA5', bg: 'rgba(58,110,165,0.12)' },
+    { lbl: 'โครงการทั้งหมด', val: projects.length, suf: 'โครงการ', trend: `ใหม่ใน 30 วัน: ${newProjects30}`, flat: true, icon: 'building', color: '#3A6EA5', bg: 'rgba(58,110,165,0.12)' },
     { lbl: 'ไฟล์ทั้งหมด', val: files.length, suf: 'ไฟล์', trend: `${latestCount} Latest`, icon: 'file', color: '#2DBE60', bg: 'rgba(45,190,96,0.12)' },
-    { lbl: 'เพิ่มใหม่ (7 วัน)', val: last7, suf: 'ไฟล์', trend: '+24% WoW', icon: 'upload', color: '#F5A623', bg: 'rgba(245,166,35,0.14)' },
-    { lbl: 'พื้นที่ใช้งาน', val: totalGB, suf: 'GB', trend: 'จาก 10 GB', flat: true, icon: 'layers', color: '#6E56CF', bg: 'rgba(110,86,207,0.12)' },
+    { lbl: 'เพิ่มใหม่ (7 วัน)', val: last7, suf: 'ไฟล์', trend: `7 วันก่อนหน้า: ${prev7} ไฟล์`, flat: true, icon: 'upload', color: '#F5A623', bg: 'rgba(245,166,35,0.14)' },
+    { lbl: 'ขนาดไฟล์รวม', val: totalGB, suf: 'GB', trend: 'รวมทุกเวอร์ชัน', flat: true, icon: 'layers', color: '#6E56CF', bg: 'rgba(110,86,207,0.12)' },
   ]
 
   return (

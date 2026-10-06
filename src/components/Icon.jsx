@@ -88,6 +88,24 @@ export default function Icon({ name, size = 18, stroke = 1.7, style, ...props })
       return <svg {...common}><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/></svg>
     case 'monitor':
       return <svg {...common}><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+    case 'alert':
+      return <svg {...common}><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>
+    case 'user':
+      return <svg {...common}><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+    case 'calendar':
+      return <svg {...common}><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>
+    case 'chevron-down':
+      return <svg {...common}><path d="m6 9 6 6 6-6"/></svg>
+    case 'info':
+      return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+    case 'checklist':
+      return <svg {...common}><path d="m3 6 2 2 3-3M3 13l2 2 3-3M3 20l2 2 3-3"/><path d="M12 6h9M12 13h9M12 20h9"/></svg>
+    case 'circle-check':
+      return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>
+    case 'paperclip':
+      return <svg {...common}><path d="m21 11-9.2 9.2a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-9.2 9.2a1.7 1.7 0 0 1-2.4-2.4L15 7.5"/></svg>
+    case 'refresh':
+      return <svg {...common}><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
     default:
       return null
   }

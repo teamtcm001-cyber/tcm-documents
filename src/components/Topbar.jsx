@@ -1,6 +1,6 @@
 import Icon from './Icon.jsx'
 
-export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, onOpenMOM, onChangeName }) {
+export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, onChangeName }) {
   const initials = (() => {
     const n = user?.user_metadata?.full_name || user?.email || '?'
     return n.slice(0, 2).toUpperCase()
@@ -24,15 +24,15 @@ export default function Topbar({ user, active, onNav, onOpenUpload, onOpenChat, 
           <button className={active === 'projects' ? 'active' : ''} onClick={() => onNav('projects')}>
             <Icon name="folder" size={15} /> โครงการ
           </button>
+          <button className={active === 'tracking' ? 'active' : ''} onClick={() => onNav('tracking')}>
+            <Icon name="trend-up" size={15} /> ติดตามงาน
+          </button>
           <button className={active === 'ai' ? 'active' : ''} onClick={onOpenChat}>
             <Icon name="sparkles" size={15} /> ถามหาเอกสาร
           </button>
         </nav>
         <button className="btn btn-sm" style={{ background: 'var(--gray-100)', color: 'var(--navy)' }} title="แจ้งเตือน">
           <Icon name="bell" size={15} />
-        </button>
-        <button className="mom-fab-btn" onClick={onOpenMOM}>
-          <Icon name="doc-text" size={15} /> เขียน MOM
         </button>
         <button className="btn btn-sm btn-navy" onClick={onOpenUpload}>
           <Icon name="upload" size={15} /> อัปโหลด

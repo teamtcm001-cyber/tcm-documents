@@ -1,6 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
 import { uploadToDrive, driveFileUrl } from '../utils/googleDrive.js';
 import { getLocalName } from '../utils/localIdentity.js';
+import {
+  todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, fmtThaiDate, ALL_STATUSES, CLEARS_BILLED_DATE,
+} from '../utils/tracking.js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -245,4 +248,479 @@ export async function fetchStats() {
     files: filesData.count || 0,
     types: 8 // Fixed for now
   };
+}
+
+// ============ PROJECT TRACKING ============
+// Backed by scripts/project-tracking.sql (the contract). The tables may not be
+// installed yet, so:
+//   * READ functions never throw. They resolve to
+//       { data, notInstalled, error }
+//     where notInstalled === true means the tracking schema is missing and the
+//     UI should show TRACKING_NOT_INSTALLED_MESSAGE instead of data.
+//   * WRITE functions throw an Error whose message is already Thai and safe to
+//     toast; err.notInstalled === true when the schema is missing.
+// Nothing here is enforced per person: updated_by / attached_by / project_co
+// are self-reported display names (see the SECURITY note in the SQL file).
+
+export const TRACKING_NOT_INSTALLED_MESSAGE =
+  'ยังไม่ได้ติดตั้งโครงสร้างข้อมูลติดตามงาน — ให้ผู้ดูแลรัน scripts/project-tracking.sql ใน Supabase SQL Editor';
+
+// Postgres: 42P01 undefined_table, 42703 undefined_column, 42883 undefined_function
+// PostgREST: PGRST200 (no such relationship), PGRST204 (column not in cache), PGRST205 (table/view not in cache)
+export function isTrackingNotInstalled(error) {
+  if (!error) return false;
+  const code = String(error.code || '');
+  if (['42P01', '42703', '42883', 'PGRST200', 'PGRST204', 'PGRST205'].includes(code)) return true;
+  return /does not exist|could not find the (table|function|relationship|'[^']+' column)|schema cache/i.test(
+    error.message || ''
+  );
+}
+
+async function trackingRead(run) {
+  try {
+    const { data, error, partial } = await run();
+    if (error) return { data: null, notInstalled: isTrackingNotInstalled(error), error };
+    return { data, notInstalled: false, error: null, partial: !!partial };
+  } catch (error) {
+    return { data: null, notInstalled: isTrackingNotInstalled(error), error };
+  }
+}
+
+// Turn a Supabase/Postgres error into an Error with a Thai message.
+function trackingWriteError(error, fallback = 'บันทึกไม่สำเร็จ') {
+  if (isTrackingNotInstalled(error)) {
+    const e = new Error(TRACKING_NOT_INSTALLED_MESSAGE);
+    e.notInstalled = true;
+    return e;
+  }
+  const msg = error?.message || '';
+  let text;
+  if (error?.code === '23505') {
+    text = /unique_label/.test(msg)
+      ? 'มีรายการชื่อนี้ในเช็กลิสต์อยู่แล้ว'
+      : 'ข้อมูลซ้ำกับที่มีอยู่แล้ว (มีคนอื่นเพิ่มพร้อมกัน ลองใหม่อีกครั้ง)';
+  } else if (error?.code === '23514') {
+    text = /projects_period_chk/.test(msg)
+      ? 'วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มสัญญา'
+      : /does not belong to project/.test(msg)
+        ? 'ไฟล์นี้ไม่ได้อยู่ในโครงการเดียวกับงวดงานนี้'
+        : `${fallback}: ข้อมูลไม่ผ่านเงื่อนไขของระบบ`;
+  } else if (error?.code === '42501') {
+    text = `${fallback}: ไม่มีสิทธิ์เขียนข้อมูลนี้ (ตรวจสอบว่ารัน scripts/project-tracking.sql ครบแล้ว)`;
+  } else {
+    text = `${fallback}: ${msg || 'ไม่ทราบสาเหตุ'}`;
+  }
+  const e = new Error(text);
+  e.cause = error;
+  return e;
+}
+
+// Validate a user-supplied date: real yyyy-mm-dd, and a plausible (Gregorian) year.
+function assertDate(v, formatMessage = 'รูปแบบวันที่ไม่ถูกต้อง') {
+  if (!isIsoDate(v)) throw new Error(formatMessage);
+  if (!isSaneDate(v)) throw new Error(INSANE_DATE_MESSAGE);
+}
+
+// Same attribution rule as logActivity: self-typed name first, then the
+// shared account's name/email. Never empty (progress_updates requires non-empty).
+async function getActorName() {
+  const local = getLocalName();
+  if (local) return local;
+  try {
+    const user = await getCurrentUser();
+    return user?.user_metadata?.full_name || user?.email || 'ไม่ระบุชื่อ';
+  } catch {
+    return 'ไม่ระบุชื่อ';
+  }
+}
+
+// An UPDATE that RLS filters out succeeds with 0 rows. Surface that as an error.
+function expectRows(data, message) {
+  if (!data || data.length === 0) {
+    throw new Error(message || 'บันทึกไม่สำเร็จ: ไม่มีแถวข้อมูลถูกแก้ไข (อาจไม่มีสิทธิ์ หรือรายการถูกลบไปแล้ว)');
+  }
+  return data[0];
+}
+
+// ---- reads: overview / progress ----
+
+// ONE query to project_tracking_overview for the cross-project view.
+// The overview view has no "days in status", which the amber rule
+// "ready_to_bill for > 7 days" needs, so a tiny best-effort second query on
+// installment_summary adds `ready_to_bill_days` per project (null if none).
+// If that second query fails the main data is still returned, but with
+// `partial: true` so the UI can warn that the health status may be incomplete
+// (the aging rule cannot fire without it).
+export function fetchTrackingOverview() {
+  return trackingRead(async () => {
+    const main = await supabase
+      .from('project_tracking_overview')
+      .select('*')
+      .order('project_code', { ascending: true });
+    if (main.error) return main;
+
+    const aging = await supabase
+      .from('installment_summary')
+      .select('project_id, days_in_status')
+      .eq('status', 'ready_to_bill');
+    const maxDays = {};
+    if (aging.error) {
+      console.warn('fetchTrackingOverview: aging query failed:', aging.error.message);
+    } else {
+      for (const r of aging.data || []) {
+        const d = r.days_in_status ?? 0;
+        if (maxDays[r.project_id] === undefined || d > maxDays[r.project_id]) maxDays[r.project_id] = d;
+      }
+    }
+    return {
+      data: (main.data || []).map((r) => ({ ...r, ready_to_bill_days: maxDays[r.project_id] ?? null })),
+      error: null,
+      partial: !!aging.error,
+    };
+  });
+}
+
+// Single project's overview row (for the detail header). data = row | null
+export function fetchProjectTrackingRow(projectId) {
+  return trackingRead(() =>
+    supabase.from('project_tracking_overview').select('*').eq('project_id', projectId).maybeSingle()
+  );
+}
+
+// Newest first. Append-only log: corrections are new rows.
+export function fetchProgressHistory(projectId) {
+  return trackingRead(() =>
+    supabase
+      .from('progress_updates')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('as_of', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(500)
+  );
+}
+
+// { percent: whole number 0-100, asOf: 'yyyy-mm-dd' (default today TH, not in the future), note? }
+export async function addProgressUpdate(projectId, { percent, asOf, note } = {}) {
+  if (percent === '' || percent == null) throw new Error('กรุณากรอก % ความคืบหน้า');
+  const n = Number(percent);
+  if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error('% ความคืบหน้าต้องเป็นจำนวนเต็ม 0–100 (ไม่มีทศนิยม)');
+  const today = todayTH();
+  const date = asOf || today;
+  assertDate(date);
+  if (date > today) throw new Error('วันที่ข้อมูลต้องไม่เกินวันนี้');
+
+  const updated_by = await getActorName();
+  const { data, error } = await supabase
+    .from('progress_updates')
+    .insert([{ project_id: projectId, percent_complete: n, as_of: date, note: (note || '').trim() || null, updated_by }])
+    .select();
+  if (error) throw trackingWriteError(error, 'บันทึก % ไม่สำเร็จ');
+  return expectRows(data);
+}
+
+// ---- installments ----
+
+// installment_summary rows for one project, ordered by installment_no
+export function fetchInstallments(projectId) {
+  return trackingRead(() =>
+    supabase
+      .from('installment_summary')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('installment_no', { ascending: true })
+  );
+}
+
+// installment_no = max + 1 (cancelled ones count, the number is never reused).
+// The trigger writes the creation event and copies the checklist template.
+export async function createInstallment(projectId, { title, plannedBillDate, note } = {}) {
+  if (plannedBillDate) assertDate(plannedBillDate);
+  const updated_by = await getActorName();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const last = await supabase
+      .from('project_installments')
+      .select('installment_no')
+      .eq('project_id', projectId)
+      .order('installment_no', { ascending: false })
+      .limit(1);
+    if (last.error) throw trackingWriteError(last.error, 'เพิ่มงวดไม่สำเร็จ');
+    const installment_no = (last.data?.[0]?.installment_no || 0) + 1;
+    const { data, error } = await supabase
+      .from('project_installments')
+      .insert([{
+        project_id: projectId,
+        installment_no,
+        title: (title || '').trim() || null,
+        planned_bill_date: plannedBillDate || null,
+        note: (note || '').trim() || null,
+        status: 'planned',
+        updated_by,
+      }])
+      .select();
+    if (!error) return expectRows(data);
+    // two coordinators added at once -> unique(project_id, installment_no); recompute and retry
+    if (error.code === '23505' && attempt < 2) continue;
+    throw trackingWriteError(error, 'เพิ่มงวดไม่สำเร็จ');
+  }
+}
+
+// changes: any of { title, plannedBillDate, note }. Does not touch status.
+export async function updateInstallment(installmentId, changes = {}) {
+  const patch = { updated_by: await getActorName() };
+  if ('title' in changes) patch.title = (changes.title || '').trim() || null;
+  if ('note' in changes) patch.note = (changes.note || '').trim() || null;
+  if ('plannedBillDate' in changes) {
+    if (changes.plannedBillDate) assertDate(changes.plannedBillDate);
+    patch.planned_bill_date = changes.plannedBillDate || null;
+  }
+  const { data, error } = await supabase
+    .from('project_installments')
+    .update(patch)
+    .eq('id', installmentId)
+    .select();
+  if (error) throw trackingWriteError(error, 'แก้ไขงวดไม่สำเร็จ');
+  return expectRows(data);
+}
+
+// Status + status_note + updated_by (+ billed_date) in ONE update, so the
+// audit trigger records the note and the actor together. Any status is allowed
+// (the DB does not restrict transitions); the caller confirms backward moves.
+// billed_date is not maintained by a trigger, so it is set here: today (or the
+// given date) when moving to 'billed', cleared when moving back to a
+// pre-billing status or cancelling, otherwise left as is.
+export async function setInstallmentStatus(installmentId, status, note, { billedDate } = {}) {
+  if (!ALL_STATUSES.includes(status)) throw new Error('สถานะไม่ถูกต้อง');
+  const patch = { status, status_note: (note || '').trim() || null, updated_by: await getActorName() };
+  if (status === 'billed') {
+    const today = todayTH();
+    const d = billedDate || today;
+    assertDate(d, 'รูปแบบวันที่เบิกไม่ถูกต้อง');
+    if (d > today) throw new Error('วันที่เบิกต้องไม่เกินวันนี้');
+    patch.billed_date = d;
+  } else if (CLEARS_BILLED_DATE.includes(status)) {
+    patch.billed_date = null;
+    // Keep the old date in the event history: the column is about to be nulled,
+    // and status_note is what the audit trigger copies into installment_events.
+    const cur = await supabase.from('project_installments').select('billed_date').eq('id', installmentId).maybeSingle();
+    if (cur.error) throw trackingWriteError(cur.error, 'เปลี่ยนสถานะไม่สำเร็จ');
+    if (cur.data?.billed_date) {
+      const marker = `ล้างวันที่เบิกเดิม ${fmtThaiDate(cur.data.billed_date)}`;
+      if (!(patch.status_note || '').includes(marker)) {
+        patch.status_note = [patch.status_note, `(${marker})`].filter(Boolean).join(' ');
+      }
+    }
+  }
+  const { data, error } = await supabase
+    .from('project_installments')
+    .update(patch)
+    .eq('id', installmentId)
+    .select();
+  if (error) throw trackingWriteError(error, 'เปลี่ยนสถานะไม่สำเร็จ');
+  return expectRows(data);
+}
+
+// Newest first. Written by trigger; read-only for the app.
+export function fetchInstallmentEvents(installmentId) {
+  return trackingRead(() =>
+    supabase
+      .from('installment_events')
+      .select('*')
+      .eq('installment_id', installmentId)
+      .order('created_at', { ascending: false })
+  );
+}
+
+// ---- checklist (installment_documents) ----
+
+// Rows + embedded file (name/ext/version info). file === null when nothing is attached.
+// file.is_latest === false means a newer version of that document exists.
+export function fetchChecklist(installmentId) {
+  return trackingRead(() =>
+    supabase
+      .from('installment_documents')
+      .select('*, file:files(id, project_id, name, ext, type, base_name, size, is_latest, created_at, uploader_name, storage_path)')
+      .eq('installment_id', installmentId)
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: true })
+  );
+}
+
+export async function addChecklistItem(installmentId, projectId, { label, required = true } = {}) {
+  const text = (label || '').trim();
+  if (!text) throw new Error('กรุณากรอกชื่อเอกสาร');
+  const last = await supabase
+    .from('installment_documents')
+    .select('sort_order')
+    .eq('installment_id', installmentId)
+    .order('sort_order', { ascending: false })
+    .limit(1);
+  if (last.error) throw trackingWriteError(last.error, 'เพิ่มรายการไม่สำเร็จ');
+  const sort_order = (last.data?.[0]?.sort_order ?? -1) + 1;
+  const { data, error } = await supabase
+    .from('installment_documents')
+    .insert([{ installment_id: installmentId, project_id: projectId, label: text, required: !!required, sort_order }])
+    .select();
+  if (error) throw trackingWriteError(error, 'เพิ่มรายการไม่สำเร็จ');
+  return expectRows(data);
+}
+
+// changes: { required?, label? }
+export async function updateChecklistItem(itemId, changes = {}) {
+  const patch = {};
+  if ('required' in changes) patch.required = !!changes.required;
+  if ('label' in changes) {
+    const text = (changes.label || '').trim();
+    if (!text) throw new Error('กรุณากรอกชื่อเอกสาร');
+    patch.label = text;
+  }
+  const { data, error } = await supabase.from('installment_documents').update(patch).eq('id', itemId).select();
+  if (error) throw trackingWriteError(error, 'แก้ไขรายการไม่สำเร็จ');
+  return expectRows(data);
+}
+
+export async function removeChecklistItem(itemId) {
+  const { data, error } = await supabase.from('installment_documents').delete().eq('id', itemId).select();
+  if (error) throw trackingWriteError(error, 'ลบรายการไม่สำเร็จ');
+  expectRows(data, 'ลบไม่สำเร็จ: ไม่พบรายการ หรือไม่มีสิทธิ์ลบ');
+}
+
+// file_id + attached_by in ONE update (the trigger checks the file is in the
+// same project and stamps attached_at).
+export async function attachFileToChecklistItem(itemId, fileId) {
+  const attached_by = await getActorName();
+  const { data, error } = await supabase
+    .from('installment_documents')
+    .update({ file_id: fileId, attached_by })
+    .eq('id', itemId)
+    .select();
+  if (error) throw trackingWriteError(error, 'แนบไฟล์ไม่สำเร็จ');
+  return expectRows(data);
+}
+
+export async function detachFileFromChecklistItem(itemId) {
+  const { data, error } = await supabase
+    .from('installment_documents')
+    .update({ file_id: null })
+    .eq('id', itemId)
+    .select();
+  if (error) throw trackingWriteError(error, 'ถอดไฟล์ไม่สำเร็จ');
+  return expectRows(data);
+}
+
+// Newest version (is_latest = true) sharing the project + base_name of `file`
+// (same grouping rule uploadFile uses). data = files row | null.
+export function fetchLatestVersionOfFile(file) {
+  return trackingRead(() =>
+    supabase
+      .from('files')
+      .select('*')
+      .eq('project_id', file.project_id)
+      .eq('base_name', file.base_name)
+      .eq('is_latest', true)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+  );
+}
+
+// ---- per-project checklist template (auto-copied into each NEW installment) ----
+
+export function fetchChecklistTemplate(projectId) {
+  return trackingRead(() =>
+    supabase
+      .from('project_checklist_templates')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: true })
+  );
+}
+
+export async function addChecklistTemplateItem(projectId, { label, required = true } = {}) {
+  const text = (label || '').trim();
+  if (!text) throw new Error('กรุณากรอกชื่อเอกสาร');
+  const last = await supabase
+    .from('project_checklist_templates')
+    .select('sort_order')
+    .eq('project_id', projectId)
+    .order('sort_order', { ascending: false })
+    .limit(1);
+  if (last.error) throw trackingWriteError(last.error, 'เพิ่มรายการแม่แบบไม่สำเร็จ');
+  const sort_order = (last.data?.[0]?.sort_order ?? -1) + 1;
+  const { data, error } = await supabase
+    .from('project_checklist_templates')
+    .insert([{ project_id: projectId, label: text, required: !!required, sort_order }])
+    .select();
+  if (error) throw trackingWriteError(error, 'เพิ่มรายการแม่แบบไม่สำเร็จ');
+  return expectRows(data);
+}
+
+export async function removeChecklistTemplateItem(templateItemId) {
+  const { data, error } = await supabase
+    .from('project_checklist_templates')
+    .delete()
+    .eq('id', templateItemId)
+    .select();
+  if (error) throw trackingWriteError(error, 'ลบรายการแม่แบบไม่สำเร็จ');
+  expectRows(data, 'ลบไม่สำเร็จ: ไม่พบรายการ หรือไม่มีสิทธิ์ลบ');
+}
+
+// For installments created before the template existed: copy template rows
+// whose label is not already on the installment. Returns how many were added.
+export async function applyChecklistTemplate(installmentId, projectId) {
+  const tpl = await supabase
+    .from('project_checklist_templates')
+    .select('label, required, sort_order')
+    .eq('project_id', projectId)
+    .order('sort_order', { ascending: true });
+  if (tpl.error) throw trackingWriteError(tpl.error, 'ใช้แม่แบบไม่สำเร็จ');
+  const existing = await supabase.from('installment_documents').select('label, sort_order').eq('installment_id', installmentId);
+  if (existing.error) throw trackingWriteError(existing.error, 'ใช้แม่แบบไม่สำเร็จ');
+  const have = new Set((existing.data || []).map((r) => r.label));
+  let next = Math.max(-1, ...(existing.data || []).map((r) => r.sort_order ?? 0)) + 1;
+  const rows = (tpl.data || [])
+    .filter((t) => !have.has(t.label))
+    .map((t) => ({ installment_id: installmentId, project_id: projectId, label: t.label, required: t.required, sort_order: next++ }));
+  if (rows.length === 0) return 0;
+  const { error } = await supabase.from('installment_documents').insert(rows);
+  if (error) throw trackingWriteError(error, 'ใช้แม่แบบไม่สำเร็จ');
+  return rows.length;
+}
+
+// ---- project: contract period + coordinator ----
+
+// updates: { start_date, end_date, project_co }. Reuses updateProject, then
+// verifies a row actually came back: without an UPDATE policy on `projects`
+// the call "succeeds" with 0 rows, which would otherwise look like a save.
+export async function updateProjectTracking(projectId, updates = {}) {
+  const start = updates.start_date || null;
+  const end = updates.end_date || null;
+  if (start) assertDate(start, 'รูปแบบวันเริ่มสัญญาไม่ถูกต้อง');
+  if (end) assertDate(end, 'รูปแบบวันสิ้นสุดสัญญาไม่ถูกต้อง');
+  if (start && end && end < start) throw new Error('วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มสัญญา');
+  const project_co = (updates.project_co || '').trim() || null;
+
+  let row;
+  try {
+    row = await updateProject(projectId, { start_date: start, end_date: end, project_co });
+  } catch (err) {
+    throw trackingWriteError(err, 'บันทึกข้อมูลโครงการไม่สำเร็จ');
+  }
+  if (!row) {
+    throw new Error(
+      'บันทึกไม่สำเร็จ: ระบบไม่ได้แก้ไขข้อมูลโครงการ (ตาราง projects อาจยังไม่อนุญาตให้แก้ไข — แจ้งผู้ดูแลตรวจ policy UPDATE)'
+    );
+  }
+  // audit trail in the existing activity log; failure here must not fail the save
+  try {
+    await logActivity(
+      projectId,
+      'tracking_update',
+      `แก้ไขข้อมูลติดตามงาน: Project Co=${project_co || '-'}, สัญญา ${start || '-'} ถึง ${end || '-'}`
+    );
+  } catch (err) {
+    console.warn('logActivity (tracking_update) failed:', err?.message);
+  }
+  return row;
 }

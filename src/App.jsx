@@ -7,11 +7,11 @@ import NameGate from './components/NameGate.jsx'
 import Topbar from './components/Topbar.jsx'
 import Hero from './components/Hero.jsx'
 import Dashboard from './components/Dashboard.jsx'
+import Tracking from './components/Tracking.jsx'
 import ProjectDrawer from './components/ProjectDrawer.jsx'
 import UploadModal from './components/UploadModal.jsx'
 import NewProjectModal from './components/NewProjectModal.jsx'
 import AIChat, { ChatFab } from './components/AIChat.jsx'
-import MOMWriter from './components/MOMWriter.jsx'
 
 // No login screen — every visitor is signed in as one shared account behind
 // the scenes so Supabase RLS (which requires an authenticated session) keeps
@@ -71,7 +71,7 @@ export default function App() {
   }
 
   // Overlay the self-reported name onto the shared account's user object so
-  // every existing user_metadata.full_name read (Topbar, uploads, MOM) shows
+  // every existing user_metadata.full_name read (Topbar, uploads) shows
   // the real person instead of the shared account for everyone.
   const displayUser = { ...user, user_metadata: { ...user.user_metadata, full_name: localName } }
 
@@ -98,14 +98,27 @@ function MainApp({ user, onChangeName }) {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
-  const [momOpen, setMomOpen] = useState(false)
   const [drawerProject, setDrawerProject] = useState(null)
+  const [trackingProjectId, setTrackingProjectId] = useState(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const [heroStats, setHeroStats] = useState({ projects: 0, files: 0, types: 0 })
   const [heroFiles, setHeroFiles] = useState([])
   const [heroProjects, setHeroProjects] = useState([])
 
   const refresh = () => setRefreshKey((k) => k + 1)
+
+  // Clicking the "ติดตามงาน" tab always returns to the cross-project overview.
+  const handleNav = (id) => {
+    if (id === 'tracking') setTrackingProjectId(null)
+    setActive(id)
+  }
+
+  // Shortcut from the project drawer straight to one project's tracking page.
+  const openTracking = (project) => {
+    setDrawerProject(null)
+    setTrackingProjectId(project.id)
+    setActive('tracking')
+  }
 
   useEffect(() => {
     loadHeroData()
@@ -169,28 +182,36 @@ function MainApp({ user, onChangeName }) {
       <Topbar
         user={user}
         active={active}
-        onNav={setActive}
+        onNav={handleNav}
         onOpenUpload={() => setUploadOpen(true)}
         onOpenChat={() => setChatOpen(true)}
-        onOpenMOM={() => setMomOpen(true)}
         onChangeName={onChangeName}
       />
 
-      <Hero
-        stats={heroStats}
-        recentFiles={heroFiles}
-        projects={heroProjects}
-        onUpload={() => setUploadOpen(true)}
-        onAsk={() => setChatOpen(true)}
-        onOpenMOM={() => setMomOpen(true)}
-      />
+      {active === 'tracking' ? (
+        <Tracking
+          projectId={trackingProjectId}
+          onSelectProject={setTrackingProjectId}
+          onOpenUpload={() => setUploadOpen(true)}
+        />
+      ) : (
+        <>
+          <Hero
+            stats={heroStats}
+            recentFiles={heroFiles}
+            projects={heroProjects}
+            onUpload={() => setUploadOpen(true)}
+            onAsk={() => setChatOpen(true)}
+          />
 
-      <Dashboard
-        refreshKey={refreshKey}
-        onOpenProject={openProjectById}
-        onOpenUpload={() => setUploadOpen(true)}
-        onNewProject={() => setNewProjectOpen(true)}
-      />
+          <Dashboard
+            refreshKey={refreshKey}
+            onOpenProject={openProjectById}
+            onOpenUpload={() => setUploadOpen(true)}
+            onNewProject={() => setNewProjectOpen(true)}
+          />
+        </>
+      )}
 
       <footer className="footer">
         TCM Document Agent · v5 Engineering Edition · Powered by Claude Haiku 4.5
@@ -205,6 +226,7 @@ function MainApp({ user, onChangeName }) {
           refreshKey={refreshKey}
           onClose={() => setDrawerProject(null)}
           onChanged={refresh}
+          onOpenTracking={openTracking}
         />
       )}
 
@@ -225,15 +247,6 @@ function MainApp({ user, onChangeName }) {
 
       {!chatOpen && <ChatFab onClick={() => setChatOpen(true)} />}
       <AIChat open={chatOpen} onClose={() => setChatOpen(false)} />
-
-      {momOpen && (
-        <MOMWriter
-          projects={heroProjects}
-          user={user}
-          onClose={() => setMomOpen(false)}
-          onSaved={refresh}
-        />
-      )}
     </div>
   )
 }

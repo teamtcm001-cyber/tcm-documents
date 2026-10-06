@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
-import { fetchFiles, fetchProjects, deleteFile, downloadFile, deleteProject, getFileBlob, updateFileContent } from '../api/supabase.js'
+import { fetchFiles, deleteFile, downloadFile, deleteProject, getFileBlob, updateFileContent } from '../api/supabase.js'
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
 import { extractTextFromBlobDetailed, RESULT } from '../utils/textExtract.js'
 import PreviewModal from './PreviewModal.jsx'
-import MOMTemplateModal from './MOMTemplateModal.jsx'
 
 function FileRow({ file, onDelete, onDownload, onPreview }) {
   const color = TYPE_COLOR[file.type] || '#6B7280'
@@ -41,7 +40,8 @@ function FileRow({ file, onDelete, onDownload, onPreview }) {
           className="icon-btn danger"
           title="ลบ"
           onClick={() => {
-            if (window.confirm(`ลบไฟล์ "${file.name}" ?`)) onDelete(file)
+            const msg = `ลบไฟล์ "${file.name}" ?\n\nไฟล์จะถูกลบถาวร และจะถูกถอดออกจากเช็กลิสต์งวดเบิกที่แนบไว้`
+            if (window.confirm(msg)) onDelete(file)
           }}
         >
           <Icon name="trash" size={15} />
@@ -51,7 +51,7 @@ function FileRow({ file, onDelete, onDownload, onPreview }) {
   )
 }
 
-export default function ProjectDrawer({ project, refreshKey, onClose, onChanged }) {
+export default function ProjectDrawer({ project, refreshKey, onClose, onChanged, onOpenTracking }) {
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -61,22 +61,11 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged 
   const [reindexProgress, setReindexProgress] = useState({ current: 0, total: 0 })
   const [reindexReport, setReindexReport] = useState(null) // { ok, failed: [{name, reason}], empty: [{name, reason}] }
   const [previewFile, setPreviewFile] = useState(null)
-  const [templateOpen, setTemplateOpen] = useState(false)
   const toast = useToast()
-
-  const [projectData, setProjectData] = useState(project)
 
   useEffect(() => {
     if (!project) return
     load()
-    // keep mom_topics/mom_logo/mom_font fresh after editing the MOM template
-    // without requiring the drawer to be closed and reopened
-    fetchProjects()
-      .then((rows) => {
-        const fresh = rows.find((p) => p.id === project.id)
-        if (fresh) setProjectData(fresh)
-      })
-      .catch(() => {})
   }, [project, refreshKey])
 
   const load = async () => {
@@ -114,7 +103,14 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged 
   }
 
   const handleDeleteProject = async () => {
-    if (!window.confirm(`ลบโครงการ "${project.name}" และไฟล์ทั้งหมด?`)) return
+    if (
+      !window.confirm(
+        `ลบโครงการ "${project.name}" และไฟล์ทั้งหมด?\n\n` +
+          'ข้อมูลติดตามงานทั้งหมดของโครงการนี้จะถูกลบถาวรด้วย ได้แก่ ประวัติ % ความคืบหน้า, งวดเบิก, ' +
+          'ประวัติสถานะงวด และเช็กลิสต์เอกสาร — กู้คืนไม่ได้'
+      )
+    )
+      return
     try {
       await deleteProject(project.id)
       toast('ลบโครงการเรียบร้อย')
@@ -242,6 +238,20 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged 
             <button className="btn btn-sm btn-primary" onClick={() => toast('Zip ทั้งโครงการ ยังไม่รองรับ', 'err')}>
               <Icon name="zip" size={13} /> Zip ทั้งโครงการ
             </button>
+            {onOpenTracking && (
+              <button
+                className="btn btn-sm"
+                style={{
+                  background: 'rgba(255,255,255,0.15)',
+                  color: 'white',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                }}
+                onClick={() => onOpenTracking(project)}
+                title="ดู % ความคืบหน้า งวดเบิก และความพร้อมของเอกสาร"
+              >
+                <Icon name="trend-up" size={13} /> ติดตามงาน
+              </button>
+            )}
             <button
               className="btn btn-sm"
               style={{
@@ -257,18 +267,6 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged 
               {reindexing
                 ? `กำลัง index... ${reindexProgress.current}/${reindexProgress.total}`
                 : 'Re-index เนื้อหา'}
-            </button>
-            <button
-              className="btn btn-sm"
-              style={{
-                background: 'rgba(255,255,255,0.15)',
-                color: 'white',
-                border: '1px solid rgba(255,255,255,0.2)',
-              }}
-              onClick={() => setTemplateOpen(true)}
-              title="ปรับวาระ/โลโก้/ฟอนต์ของรายงาน MOM สำหรับโครงการนี้"
-            >
-              <Icon name="doc-text" size={13} /> ตั้งค่า Form MOM
             </button>
             <button
               className="btn btn-sm"
@@ -368,10 +366,6 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged 
 
       {previewFile && (
         <PreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
-      )}
-
-      {templateOpen && (
-        <MOMTemplateModal project={projectData} onClose={() => setTemplateOpen(false)} onSaved={onChanged} />
       )}
     </>
   )

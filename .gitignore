@@ -30,3 +30,8 @@ yarn-error.log*
 .cache/
 .temp/
 *.bak
+
+.vercel
+
+# Claude Code local permissions (can contain secrets from approved commands)
+.claude/settings.local.json

@@ -8,7 +8,7 @@ export function ToastProvider({ children }) {
   const push = useCallback((msg, kind = 'ok') => {
     const id = Math.random().toString(36).slice(2)
     setToasts((t) => [...t, { id, msg, kind }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2800)
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'err' ? 6000 : 2800)
   }, [])
 
   return (
