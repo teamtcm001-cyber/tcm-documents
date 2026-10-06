@@ -103,8 +103,18 @@ export async function fetchLatestFiles(limit = 10) {
   return data || [];
 }
 
-export async function uploadFile(projectId, file, fileType, uploaderName, contentText = null) {
+// Postgres text cannot hold NUL, and PostgREST rejects lone UTF-16 surrogates
+// ("unsupported Unicode escape sequence"). PDF text extraction can produce both.
+export function sanitizePgText(text) {
+  if (typeof text !== 'string') return text;
+  return text
+    .replace(/\u0000/g, '')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
+export async function uploadFile(projectId, file, fileType, uploaderName = null, contentText = null) {
   const user = await getCurrentUser();
+  contentText = sanitizePgText(contentText);
 
   // 1. Upload to Google Drive — storage_path stores the Drive file id
   const driveFileId = await uploadToDrive(file);
@@ -122,7 +132,7 @@ export async function uploadFile(projectId, file, fileType, uploaderName, conten
     ext: ext,
     storage_path: driveFileId,
     uploader_id: user.id,
-    uploader_name: uploaderName,
+    uploader_name: uploaderName || null,
     is_latest: true
   };
   if (contentText) {
@@ -160,7 +170,7 @@ export async function uploadFile(projectId, file, fileType, uploaderName, conten
 export async function updateFileContent(fileId, contentText) {
   const { error } = await supabase
     .from('files')
-    .update({ content_text: contentText })
+    .update({ content_text: sanitizePgText(contentText) })
     .eq('id', fileId);
   if (error && !/content_text/i.test(error.message || '')) throw error;
   return !error;
@@ -221,7 +231,7 @@ export async function fetchActivity(projectId, limit = 6) {
   return data || [];
 }
 
-export async function logActivity(projectId, action, details, fileId = null) {
+export async function logActivity(projectId, action, details, fileId = null, { anonymous = false } = {}) {
   const user = await getCurrentUser();
   const { error } = await supabase
     .from('activity')
@@ -231,7 +241,7 @@ export async function logActivity(projectId, action, details, fileId = null) {
       details,
       file_id: fileId,
       user_id: user.id,
-      user_name: getLocalName() || user.user_metadata?.full_name || user.email
+      user_name: anonymous ? null : getLocalName() || user.user_metadata?.full_name || user.email
     }]);
   if (error) throw error;
 }

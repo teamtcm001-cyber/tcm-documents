@@ -68,7 +68,6 @@ export default function UploadModal({ user, onClose, onUploaded }) {
       return
     }
     setSubmitting(true)
-    const uploaderName = user?.user_metadata?.full_name || user?.email || 'ผู้ใช้'
     let ok = 0
     let fail = 0
     for (const it of items) {
@@ -86,9 +85,9 @@ export default function UploadModal({ user, onClose, onUploaded }) {
         }
         setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 70 } : x)))
 
-        await uploadFile(projId, it.file, it.type, uploaderName, contentText)
+        await uploadFile(projId, it.file, it.type, null, contentText)
         try {
-          await logActivity(projId, 'upload', `อัปโหลด ${it.name}`)
+          await logActivity(projId, 'upload', `อัปโหลด ${it.name}`, null, { anonymous: true })
         } catch (_) {}
         setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 100, done: true } : x)))
         ok++
