@@ -63,7 +63,7 @@ function ProjectRow({ item, mineName, onOpen }) {
             ) : (
               <>
                 <span>
-                  ณ {fmtThaiDate(row.progress_as_of)} · โดย {row.progress_updated_by}
+                  ณ {fmtThaiDate(row.progress_as_of)}
                 </span>
                 {stale && <ToneBadge tone="warn">ไม่อัปเดต {row.days_since_update} วัน</ToneBadge>}
               </>

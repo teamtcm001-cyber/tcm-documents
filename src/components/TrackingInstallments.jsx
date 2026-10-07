@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import {
-  createInstallment, updateInstallment, setInstallmentStatus, fetchInstallmentEvents,
+  createInstallment, updateInstallment, setInstallmentStatus, deleteInstallment,
 } from '../api/supabase.js'
 import {
   STATUS_FLOW, ALL_STATUSES, STATUS_LABEL, STATUS_TONE, installmentHeadline, installmentName, isBackwardMove,
-  nextStatusInFlow, docsStateText, fmtThaiDate, fmtThaiDateTime, countdownText, todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE,
+  docsStateText, fmtThaiDate, fmtThaiDateTime, countdownText, todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE,
 } from '../utils/tracking.js'
 import { ToneBadge } from './TrackingBits.jsx'
 import TrackingChecklist from './TrackingChecklist.jsx'
@@ -40,55 +40,30 @@ function Stepper({ status }) {
   )
 }
 
-// ---------- event history ----------
-function EventsPanel({ installmentId }) {
-  const [state, setState] = useState({ loading: true, events: [], error: '' })
-  useEffect(() => {
-    let alive = true
-    fetchInstallmentEvents(installmentId).then(
-      (res) => alive && setState({ loading: false, events: res.data || [], error: res.error ? res.error.message : '' })
-    )
-    return () => {
-      alive = false
-    }
-  }, [installmentId])
-  if (state.loading) return <div className="muted small" style={{ padding: 8 }}>กำลังโหลดประวัติ...</div>
-  if (state.error) return <div className="auth-msg err">โหลดประวัติไม่สำเร็จ: {state.error}</div>
-  if (state.events.length === 0) return <div className="trk-empty">ยังไม่มีประวัติ</div>
-  return (
-    <ul className="trk-events">
-      {state.events.map((ev) => (
-        <li key={ev.id}>
-          <div>
-            <b>{ev.from_status ? `${STATUS_LABEL[ev.from_status] || ev.from_status} → ` : 'สร้างงวด · '}</b>
-            <b>{STATUS_LABEL[ev.to_status] || ev.to_status}</b>
-            {ev.note && <span className="trk-ev-note"> — “{ev.note}”</span>}
-          </div>
-          <div className="muted small">
-            {fmtThaiDateTime(ev.created_at)} · โดย {ev.actor_name || 'ไม่ระบุ'}
-          </div>
-        </li>
-      ))}
-    </ul>
-  )
-}
-
 // ---------- one installment ----------
-function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
+function InstallmentCard({ inst, open, onToggle, onChanged, onDeleted, onOpenUpload }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
+  const [no, setNo] = useState(String(inst.installment_no))
   const [title, setTitle] = useState(inst.title || '')
   const [planned, setPlanned] = useState(inst.planned_bill_date || '')
   const [inote, setInote] = useState(inst.note || '')
-  const [target, setTarget] = useState(nextStatusInFlow(inst.status))
-  const [note, setNote] = useState('')
-  // Default to the original billed date when there is one (e.g. approved/paid moved
-  // back to billed) so it is not silently overwritten with today.
+  // The status form always starts on the CURRENT status, so "save" works at any
+  // time (it then just persists the note / billed date).
+  const [target, setTarget] = useState(inst.status)
+  // status_note is the installment's persistent "หมายเหตุสถานะ" (no history any more).
+  const [note, setNote] = useState(inst.status_note || '')
+  // Prefilled with the stored billed date (e.g. approved/paid moved back to billed)
+  // so it is never silently overwritten with today.
   const [billedDate, setBilledDate] = useState(inst.billed_date || todayTH())
   const [busy, setBusy] = useState(false)
-  const [showHistory, setShowHistory] = useState(false)
-  const [historyKey, setHistoryKey] = useState(0)
 
+  useEffect(() => {
+    setTarget(inst.status)
+  }, [inst.installment_id, inst.status])
+  useEffect(() => {
+    setNote(inst.status_note || '')
+  }, [inst.installment_id, inst.status_note])
   // Re-seed the date whenever the target status or the stored billed_date changes.
   useEffect(() => {
     setBilledDate(inst.billed_date || todayTH())
@@ -99,6 +74,7 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
   const today = todayTH()
 
   const startEdit = () => {
+    setNo(String(inst.installment_no))
     setTitle(inst.title || '')
     setPlanned(inst.planned_bill_date || '')
     setInote(inst.note || '')
@@ -107,6 +83,12 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
 
   const saveEdit = async (e) => {
     e.preventDefault()
+    const rawNo = String(no).trim()
+    const n = Number(rawNo)
+    if (rawNo === '' || !Number.isInteger(n) || n < 1) {
+      toast('งวดที่ต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป', 'err')
+      return
+    }
     if (planned && !isIsoDate(planned)) {
       toast('รูปแบบวันที่ไม่ถูกต้อง', 'err')
       return
@@ -117,7 +99,9 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
     }
     setBusy(true)
     try {
-      await updateInstallment(inst.installment_id, { title, plannedBillDate: planned, note: inote })
+      const changes = { title, plannedBillDate: planned, note: inote }
+      if (n !== inst.installment_no) changes.installmentNo = n
+      await updateInstallment(inst.installment_id, changes)
       toast('บันทึกงวดเรียบร้อย')
       setEditing(false)
       await onChanged()
@@ -128,17 +112,36 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
     }
   }
 
+  const remove = async () => {
+    const billedWarn = inst.is_billed ? `\nงวดนี้อยู่ในสถานะ "${STATUS_LABEL[inst.status]}" แล้ว\n` : ''
+    const msg =
+      `ลบ ${installmentName(inst)}${inst.title ? ` (${inst.title})` : ''} ถาวรใช่หรือไม่?\n${billedWarn}\n` +
+      'ระบบจะลบงวดนี้และเช็กลิสต์เอกสารของงวดนี้ทั้งหมด ย้อนกลับไม่ได้ (ตัวไฟล์เอกสารยังอยู่ในระบบ ไม่ถูกลบ)'
+    if (!window.confirm(msg)) return
+    setBusy(true)
+    try {
+      await deleteInstallment(inst.installment_id)
+      toast(`ลบ ${installmentName(inst)} แล้ว`)
+      onDeleted?.(inst.installment_id)
+      await onChanged()
+    } catch (err) {
+      toast(err.message, 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const changeStatus = async (e) => {
     e.preventDefault()
-    if (target === inst.status) return
-    if (isBackwardMove(inst.status, target)) {
+    const changing = target !== inst.status
+    if (changing && isBackwardMove(inst.status, target)) {
       const msg =
         target === 'cancelled'
           ? `ยืนยันยกเลิก ${installmentName(inst)}?`
           : `ย้อนสถานะ ${installmentName(inst)} จาก "${STATUS_LABEL[inst.status]}" เป็น "${STATUS_LABEL[target]}" ใช่หรือไม่?`
       if (!window.confirm(msg)) return
     }
-    if ((target === 'ready_to_bill' || target === 'billed') && inst.docs_state === 'missing') {
+    if (changing && (target === 'ready_to_bill' || target === 'billed') && inst.docs_state === 'missing') {
       const miss = inst.required_docs_total - inst.required_docs_attached
       if (!window.confirm(`เอกสารจำเป็นยังขาด ${miss} รายการ — ต้องการเปลี่ยนเป็น "${STATUS_LABEL[target]}" ต่อหรือไม่?`)) return
     }
@@ -159,10 +162,7 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
     setBusy(true)
     try {
       await setInstallmentStatus(inst.installment_id, target, note, { billedDate })
-      toast(`${installmentName(inst)}: ${STATUS_LABEL[target]}`)
-      setNote('')
-      setTarget(nextStatusInFlow(target))
-      setHistoryKey((k) => k + 1)
+      toast(`บันทึกสถานะแล้ว — ${installmentName(inst)}: ${STATUS_LABEL[target]}`)
       await onChanged()
     } catch (err) {
       toast(err.message, 'err')
@@ -203,8 +203,20 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
       {open && (
         <div className="trk-inst-body" id={bodyId}>
           {editing ? (
-            <form className="trk-edit" onSubmit={saveEdit}>
+            <form className="trk-edit" onSubmit={saveEdit} noValidate>
               <div className="trk-form-row">
+                <div className="field" style={{ flex: '0 1 100px' }}>
+                  <label htmlFor={`no-${bodyId}`}>งวดที่</label>
+                  <input
+                    id={`no-${bodyId}`}
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    step="1"
+                    value={no}
+                    onChange={(e) => setNo(e.target.value)}
+                  />
+                </div>
                 <div className="field" style={{ flex: '2 1 220px' }}>
                   <label htmlFor={`t-${bodyId}`}>ชื่องวด / รายละเอียด</label>
                   <input id={`t-${bodyId}`} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="เช่น ส่งมอบรายงานฉบับสมบูรณ์" />
@@ -216,15 +228,18 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
                 </div>
               </div>
               <div className="field">
-                <label htmlFor={`n-${bodyId}`}>หมายเหตุ</label>
+                <label htmlFor={`n-${bodyId}`}>หมายเหตุทั่วไป</label>
                 <input id={`n-${bodyId}`} value={inote} onChange={(e) => setInote(e.target.value)} />
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div className="trk-edit-actions">
                 <button type="submit" className="btn btn-primary btn-sm" disabled={busy}>
                   <Icon name="check" size={13} /> บันทึก
                 </button>
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(false)} disabled={busy}>
                   ยกเลิก
+                </button>
+                <button type="button" className="trk-danger-btn" onClick={remove} disabled={busy}>
+                  <Icon name="trash" size={13} /> ลบงวด
                 </button>
               </div>
             </form>
@@ -254,11 +269,15 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
                 <div>{inst.days_in_status != null ? `${inst.days_in_status} วัน` : '-'}</div>
               </div>
               <div style={{ flex: '1 1 200px' }}>
-                <span className="muted small">หมายเหตุ</span>
+                <span className="muted small">หมายเหตุสถานะ</span>
+                <div>{inst.status_note || <span className="muted">-</span>}</div>
+              </div>
+              <div style={{ flex: '1 1 200px' }}>
+                <span className="muted small">หมายเหตุทั่วไป</span>
                 <div>{inst.note || <span className="muted">-</span>}</div>
               </div>
               <button type="button" className="trk-link-btn" onClick={startEdit}>
-                <Icon name="pen" size={13} /> แก้ไขชื่อ/วันที่
+                <Icon name="pen" size={13} /> แก้ไขงวด
               </button>
             </div>
           )}
@@ -268,7 +287,17 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
           <form className="trk-status-form" onSubmit={changeStatus}>
             <div className="field" style={{ flex: '1 1 180px' }}>
               <label htmlFor={`s-${bodyId}`}>เปลี่ยนสถานะ</label>
-              <select id={`s-${bodyId}`} value={target} onChange={(e) => setTarget(e.target.value)}>
+              <select
+                id={`s-${bodyId}`}
+                value={target}
+                onChange={(e) => {
+                  const next = e.target.value
+                  // the saved note belongs to the saved status: don't carry it onto another one
+                  if (next !== inst.status && note === (inst.status_note || '')) setNote('')
+                  if (next === inst.status) setNote(inst.status_note || '')
+                  setTarget(next)
+                }}
+              >
                 {ALL_STATUSES.map((s) => (
                   <option key={s} value={s}>
                     {STATUS_LABEL[s]}
@@ -277,34 +306,22 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onOpenUpload }) {
                 ))}
               </select>
             </div>
-            {target === 'billed' && inst.status !== 'billed' && (
+            {target === 'billed' && (
               <div className="field" style={{ flex: '0 1 160px' }}>
                 <label htmlFor={`b-${bodyId}`}>วันที่เบิก</label>
                 <input id={`b-${bodyId}`} type="date" value={billedDate} max={today} onChange={(e) => setBilledDate(e.target.value)} />
               </div>
             )}
             <div className="field" style={{ flex: '2 1 220px' }}>
-              <label htmlFor={`m-${bodyId}`}>หมายเหตุ (ไม่บังคับ)</label>
+              <label htmlFor={`m-${bodyId}`}>หมายเหตุสถานะ (ไม่บังคับ)</label>
               <input id={`m-${bodyId}`} value={note} onChange={(e) => setNote(e.target.value)} placeholder="เช่น ส่งเอกสารเบิกให้ผู้ว่าจ้างแล้ว" />
             </div>
-            <button type="submit" className="btn btn-primary btn-sm trk-status-btn" disabled={busy || target === inst.status}>
+            <button type="submit" className="btn btn-primary btn-sm trk-status-btn" disabled={busy}>
               <Icon name="check" size={13} /> บันทึกสถานะ
             </button>
           </form>
 
-          <div className="trk-hist-bar">
-            <div className="muted small">
-              แก้ไขล่าสุดโดย {inst.updated_by || 'ไม่ระบุ'} · {fmtThaiDateTime(inst.updated_at)}
-            </div>
-            <button type="button" className="trk-link-btn" aria-expanded={showHistory} onClick={() => setShowHistory((v) => !v)}>
-              <Icon name="history" size={13} /> ประวัติสถานะ
-            </button>
-          </div>
-          {showHistory && (
-            <div className="trk-hist-panel">
-              <EventsPanel key={historyKey} installmentId={inst.installment_id} />
-            </div>
-          )}
+          <div className="muted small">แก้ไขล่าสุด {fmtThaiDateTime(inst.updated_at)}</div>
 
           <TrackingChecklist
             installment={inst}
@@ -384,7 +401,7 @@ export default function TrackingInstallments({ installments, projectId, onChange
             </div>
           </div>
           <div className="muted small" style={{ marginBottom: 10 }}>
-            เลขงวดรันให้อัตโนมัติ (งวดที่ {(installments.reduce((m, i) => Math.max(m, i.installment_no), 0)) + 1}) ·
+            เลขงวดรันให้อัตโนมัติ (งวดที่ {(installments.reduce((m, i) => Math.max(m, i.installment_no), 0)) + 1} — แก้เลขงวดภายหลังได้) ·
             เช็กลิสต์จะถูกคัดลอกจากแม่แบบของโครงการ
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -409,6 +426,7 @@ export default function TrackingInstallments({ installments, projectId, onChange
               open={openId === inst.installment_id}
               onToggle={() => setOpenId(openId === inst.installment_id ? null : inst.installment_id)}
               onChanged={onChanged}
+              onDeleted={(id) => setOpenId((cur) => (cur === id ? null : cur))}
               onOpenUpload={onOpenUpload}
             />
           ))}

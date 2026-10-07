@@ -432,7 +432,6 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
                           <span className="muted small">
                             {(f.ext || '').toUpperCase()}
                             {ver ? ` · ${ver}` : ''} · อัปโหลด {fmtThaiDate((f.created_at || '').slice(0, 10))}
-                            {it.attached_by ? ` · แนบโดย ${it.attached_by}` : ''}
                           </span>
                           {outdated && <ToneBadge tone="warn">มีเวอร์ชันใหม่กว่า</ToneBadge>}
                         </div>

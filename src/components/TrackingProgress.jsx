@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
-import { addProgressUpdate } from '../api/supabase.js'
+import { addProgressUpdate, updateProgressUpdate, deleteProgressUpdate } from '../api/supabase.js'
 import { getLocalName } from '../utils/localIdentity.js'
 import {
   todayTH, fmtThaiDate, fmtThaiDateTime, daysBetween, elapsedPctAt, dailyProgressSeries, isStale, isIsoDate, isSaneDate, isMine,
@@ -99,6 +99,146 @@ function ProgressTrend({ history, start, end }) {
   )
 }
 
+// Same rules as the add form. Returns an error message, or '' when valid.
+function validateProgressFields(percent, asOf, today) {
+  const raw = String(percent).trim()
+  const n = Number(raw)
+  if (raw === '' || !Number.isInteger(n) || n < 0 || n > 100) return '% ต้องเป็นจำนวนเต็ม 0–100 (ไม่มีทศนิยม)'
+  if (!isIsoDate(asOf)) return 'กรุณาเลือกวันที่ข้อมูล'
+  if (!isSaneDate(asOf)) return INSANE_DATE_MESSAGE
+  if (asOf > today) return 'วันที่ข้อมูลต้องไม่เกินวันนี้'
+  return ''
+}
+
+// ---------- one history row (view / inline edit) ----------
+function HistoryRow({ h, delta, today, onChanged }) {
+  const toast = useToast()
+  const [editing, setEditing] = useState(false)
+  const [percent, setPercent] = useState(String(h.percent_complete))
+  const [asOf, setAsOf] = useState(h.as_of)
+  const [note, setNote] = useState(h.note || '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const startEdit = () => {
+    setPercent(String(h.percent_complete))
+    setAsOf(h.as_of)
+    setNote(h.note || '')
+    setError('')
+    setEditing(true)
+  }
+
+  const save = async (e) => {
+    e.preventDefault()
+    const msg = validateProgressFields(percent, asOf, today)
+    if (msg) {
+      setError(msg)
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await updateProgressUpdate(h.id, { percent: Number(percent), asOf, note })
+      toast('แก้ไขรายการเรียบร้อย')
+      setEditing(false)
+      await onChanged()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async () => {
+    if (
+      !window.confirm(
+        `ลบรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)} ถาวรใช่หรือไม่?\n\nค่าปัจจุบัน กราฟ และภาพรวมจะคำนวณใหม่จากรายการที่เหลือ`
+      )
+    )
+      return
+    setBusy(true)
+    try {
+      await deleteProgressUpdate(h.id)
+      toast('ลบรายการแล้ว')
+      await onChanged()
+    } catch (err) {
+      toast(err.message, 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <tr className="trk-row-edit">
+        <td colSpan={6}>
+          <form onSubmit={save} noValidate>
+            <div className="trk-form-row">
+              <div className="field" style={{ flex: '0 1 110px' }}>
+                <label htmlFor={`ep-${h.id}`}>% (จำนวนเต็ม)</label>
+                <input
+                  id={`ep-${h.id}`}
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  inputMode="numeric"
+                  value={percent}
+                  onChange={(e) => setPercent(e.target.value)}
+                />
+              </div>
+              <div className="field" style={{ flex: '1 1 170px' }}>
+                <label htmlFor={`ed-${h.id}`}>ข้อมูล ณ วันที่</label>
+                <input id={`ed-${h.id}`} type="date" value={asOf} max={today} onChange={(e) => setAsOf(e.target.value)} />
+                <span className="muted small">{isIsoDate(asOf) ? `= ${fmtThaiDate(asOf, { long: true })}` : ''}</span>
+              </div>
+              <div className="field" style={{ flex: '2 1 220px' }}>
+                <label htmlFor={`en-${h.id}`}>หมายเหตุ</label>
+                <input id={`en-${h.id}`} type="text" value={note} onChange={(e) => setNote(e.target.value)} />
+              </div>
+            </div>
+            {error && (
+              <div className="auth-msg err" role="alert">
+                {error}
+              </div>
+            )}
+            <div className="trk-edit-actions">
+              <button type="submit" className="btn btn-primary btn-sm" disabled={busy}>
+                <Icon name="check" size={13} /> {busy ? 'กำลังบันทึก...' : 'บันทึก'}
+              </button>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(false)} disabled={busy}>
+                ยกเลิก
+              </button>
+            </div>
+          </form>
+        </td>
+      </tr>
+    )
+  }
+
+  return (
+    <tr>
+      <td>{fmtThaiDate(h.as_of)}</td>
+      <td><b>{h.percent_complete}%</b></td>
+      <td className={delta > 0 ? 'up' : delta < 0 ? 'down' : ''}>
+        {delta == null ? '-' : delta > 0 ? `+${delta}` : delta}
+      </td>
+      <td>{h.note || '-'}</td>
+      <td className="muted">{fmtThaiDateTime(h.created_at)}</td>
+      <td>
+        <div className="trk-row-actions">
+          <button type="button" className="trk-link-btn" onClick={startEdit} disabled={busy} aria-label={`แก้ไขรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)}`}>
+            <Icon name="pen" size={13} /> แก้ไข
+          </button>
+          <button type="button" className="trk-link-btn danger" onClick={remove} disabled={busy} aria-label={`ลบรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)}`}>
+            <Icon name="trash" size={13} /> ลบ
+          </button>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
 // ---------- panel ----------
 export default function TrackingProgress({ row, history, onSaved }) {
   const toast = useToast()
@@ -119,24 +259,12 @@ export default function TrackingProgress({ row, history, onSaved }) {
   const submit = async (e) => {
     e.preventDefault()
     setError('')
-    const raw = String(percent).trim()
-    const n = Number(raw)
-    if (raw === '' || !Number.isInteger(n) || n < 0 || n > 100) {
-      setError('% ต้องเป็นจำนวนเต็ม 0–100 (ไม่มีทศนิยม)')
+    const msg = validateProgressFields(percent, asOf, today)
+    if (msg) {
+      setError(msg)
       return
     }
-    if (!isIsoDate(asOf)) {
-      setError('กรุณาเลือกวันที่ข้อมูล')
-      return
-    }
-    if (!isSaneDate(asOf)) {
-      setError(INSANE_DATE_MESSAGE)
-      return
-    }
-    if (asOf > today) {
-      setError('วันที่ข้อมูลต้องไม่เกินวันนี้')
-      return
-    }
+    const n = Number(String(percent).trim())
     if (!never && n < row.percent_complete && asOf >= row.progress_as_of) {
       if (!window.confirm(`% ลดลงจากเดิม (${row.percent_complete}% → ${n}%) ยืนยันบันทึก?`)) return
     }
@@ -190,7 +318,7 @@ export default function TrackingProgress({ row, history, onSaved }) {
             ) : (
               <>
                 <span>
-                  ณ {fmtThaiDate(row.progress_as_of)} · โดย {row.progress_updated_by}
+                  ณ {fmtThaiDate(row.progress_as_of)}
                 </span>
                 {isStale(row) && <ToneBadge tone="warn">ไม่อัปเดต {row.days_since_update} วัน</ToneBadge>}
               </>
@@ -246,13 +374,13 @@ export default function TrackingProgress({ row, history, onSaved }) {
         </div>
         {sameDay && (
           <div className="trk-hint">
-            วันที่นี้มีการบันทึกแล้ว ({sameDay.percent_complete}% โดย {sameDay.updated_by}) — รายการใหม่จะแสดงแทนในกราฟ
+            วันที่นี้มีการบันทึกแล้ว ({sameDay.percent_complete}%) — รายการใหม่จะแสดงแทนในกราฟ
             ส่วนรายการเดิมยังเก็บในประวัติ
           </div>
         )}
         {otherCo && (
           <div className="trk-hint">
-            โปรเจกต์นี้ระบุ Project Co เป็น "{row.project_co}" — การบันทึกจะลงชื่อ "{localName}" ระบบไม่ได้จำกัดสิทธิ์ตามชื่อ
+            โปรเจกต์นี้ระบุ Project Co เป็น "{row.project_co}" — ระบบไม่ได้จำกัดสิทธิ์ตามชื่อ และไม่บันทึกว่าใครเป็นผู้อัปเดต
           </div>
         )}
         {error && (
@@ -280,27 +408,16 @@ export default function TrackingProgress({ row, history, onSaved }) {
                   <th>ข้อมูล ณ</th>
                   <th>%</th>
                   <th>เปลี่ยน</th>
-                  <th>โดย</th>
                   <th>หมายเหตุ</th>
                   <th>บันทึกเมื่อ</th>
+                  <th>จัดการ</th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map((h, i) => {
                   const prev = history[i + 1]
                   const d = prev ? h.percent_complete - prev.percent_complete : null
-                  return (
-                    <tr key={h.id}>
-                      <td>{fmtThaiDate(h.as_of)}</td>
-                      <td><b>{h.percent_complete}%</b></td>
-                      <td className={d > 0 ? 'up' : d < 0 ? 'down' : ''}>
-                        {d == null ? '-' : d > 0 ? `+${d}` : d}
-                      </td>
-                      <td>{h.updated_by}</td>
-                      <td>{h.note || '-'}</td>
-                      <td className="muted">{fmtThaiDateTime(h.created_at)}</td>
-                    </tr>
-                  )
+                  return <HistoryRow key={h.id} h={h} delta={d} today={today} onChanged={async () => { await onSaved?.() }} />
                 })}
               </tbody>
             </table>

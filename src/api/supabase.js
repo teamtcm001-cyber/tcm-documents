@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { uploadToDrive, driveFileUrl } from '../utils/googleDrive.js';
 import { getLocalName } from '../utils/localIdentity.js';
 import {
-  todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, fmtThaiDate, ALL_STATUSES, CLEARS_BILLED_DATE,
+  todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, ALL_STATUSES, CLEARS_BILLED_DATE,
 } from '../utils/tracking.js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -331,18 +331,11 @@ function assertDate(v, formatMessage = 'รูปแบบวันที่ไ�
   if (!isSaneDate(v)) throw new Error(INSANE_DATE_MESSAGE);
 }
 
-// Same attribution rule as logActivity: self-typed name first, then the
-// shared account's name/email. Never empty (progress_updates requires non-empty).
-async function getActorName() {
-  const local = getLocalName();
-  if (local) return local;
-  try {
-    const user = await getCurrentUser();
-    return user?.user_metadata?.full_name || user?.email || 'ไม่ระบุชื่อ';
-  } catch {
-    return 'ไม่ระบุชื่อ';
-  }
-}
+// Tracking writes deliberately do NOT record who made the change (user decision).
+// progress_updates.updated_by is NOT NULL with a non-empty check in the live DB,
+// so it gets this placeholder; every other recorder column is simply null.
+// The UI treats '-' / '' / null as "no name" and never displays it.
+const NO_RECORDER = '-';
 
 // An UPDATE that RLS filters out succeeds with 0 rows. Surface that as an error.
 function expectRows(data, message) {
@@ -350,6 +343,25 @@ function expectRows(data, message) {
     throw new Error(message || 'บันทึกไม่สำเร็จ: ไม่มีแถวข้อมูลถูกแก้ไข (อาจไม่มีสิทธิ์ หรือรายการถูกลบไปแล้ว)');
   }
   return data[0];
+}
+
+// UPDATE/DELETE on installments (delete) and progress_updates (edit/delete) only
+// have RLS policies after scripts/project-tracking-fix-2.sql has been run. Before
+// that, Postgres answers 42501 or RLS silently matches 0 rows; both mean the same
+// thing to the user: ask the admin to run fix-2.
+function fix2Message(verb) {
+  return `${verb}ไม่สำเร็จ — ผู้ดูแลต้องรัน scripts/project-tracking-fix-2.sql ใน Supabase SQL Editor ก่อน`;
+}
+function isPermissionError(error) {
+  return String(error?.code || '') === '42501' || /permission denied|row-level security/i.test(error?.message || '');
+}
+// Run on the { data, error } of a write that needs fix-2. Throws a Thai Error, else returns the first row.
+function expectFix2Rows({ data, error }, verb) {
+  if (error) {
+    if (isPermissionError(error)) throw new Error(fix2Message(verb));
+    throw trackingWriteError(error, `${verb}ไม่สำเร็จ`);
+  }
+  return expectRows(data, `${fix2Message(verb)} (หากรันแล้ว ให้รีเฟรชหน้า — รายการอาจถูกลบไปแล้ว)`);
 }
 
 // ---- reads: overview / progress ----
@@ -397,7 +409,7 @@ export function fetchProjectTrackingRow(projectId) {
   );
 }
 
-// Newest first. Append-only log: corrections are new rows.
+// Newest first. Entries can be corrected or deleted (needs scripts/project-tracking-fix-2.sql).
 export function fetchProgressHistory(projectId) {
   return trackingRead(() =>
     supabase
@@ -411,7 +423,7 @@ export function fetchProgressHistory(projectId) {
 }
 
 // { percent: whole number 0-100, asOf: 'yyyy-mm-dd' (default today TH, not in the future), note? }
-export async function addProgressUpdate(projectId, { percent, asOf, note } = {}) {
+function validateProgressInput({ percent, asOf, note }) {
   if (percent === '' || percent == null) throw new Error('กรุณากรอก % ความคืบหน้า');
   const n = Number(percent);
   if (!Number.isInteger(n) || n < 0 || n > 100) throw new Error('% ความคืบหน้าต้องเป็นจำนวนเต็ม 0–100 (ไม่มีทศนิยม)');
@@ -419,14 +431,32 @@ export async function addProgressUpdate(projectId, { percent, asOf, note } = {})
   const date = asOf || today;
   assertDate(date);
   if (date > today) throw new Error('วันที่ข้อมูลต้องไม่เกินวันนี้');
+  return { percent_complete: n, as_of: date, note: (note || '').trim() || null };
+}
 
-  const updated_by = await getActorName();
+export async function addProgressUpdate(projectId, input = {}) {
+  const fields = validateProgressInput(input);
+  const updated_by = NO_RECORDER;
   const { data, error } = await supabase
     .from('progress_updates')
-    .insert([{ project_id: projectId, percent_complete: n, as_of: date, note: (note || '').trim() || null, updated_by }])
+    .insert([{ project_id: projectId, ...fields, updated_by }])
     .select();
   if (error) throw trackingWriteError(error, 'บันทึก % ไม่สำเร็จ');
   return expectRows(data);
+}
+
+// Correct an existing entry (same validation as adding). Needs fix-2 (UPDATE policy).
+// updated_by is deliberately left untouched: no names are recorded.
+export async function updateProgressUpdate(id, input = {}) {
+  const fields = validateProgressInput(input);
+  const res = await supabase.from('progress_updates').update(fields).eq('id', id).select();
+  return expectFix2Rows(res, 'แก้ไขรายการ');
+}
+
+// Needs fix-2 (DELETE policy).
+export async function deleteProgressUpdate(id) {
+  const res = await supabase.from('progress_updates').delete().eq('id', id).select();
+  expectFix2Rows(res, 'ลบรายการ');
 }
 
 // ---- installments ----
@@ -446,7 +476,7 @@ export function fetchInstallments(projectId) {
 // The trigger writes the creation event and copies the checklist template.
 export async function createInstallment(projectId, { title, plannedBillDate, note } = {}) {
   if (plannedBillDate) assertDate(plannedBillDate);
-  const updated_by = await getActorName();
+  const updated_by = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     const last = await supabase
       .from('project_installments')
@@ -475,9 +505,16 @@ export async function createInstallment(projectId, { title, plannedBillDate, not
   }
 }
 
-// changes: any of { title, plannedBillDate, note }. Does not touch status.
+// changes: any of { installmentNo, title, plannedBillDate, note }. Does not touch status.
 export async function updateInstallment(installmentId, changes = {}) {
-  const patch = { updated_by: await getActorName() };
+  const patch = { updated_by: null };
+  if ('installmentNo' in changes) {
+    const n = Number(changes.installmentNo);
+    if (changes.installmentNo === '' || changes.installmentNo == null || !Number.isInteger(n) || n < 1) {
+      throw new Error('งวดที่ต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป');
+    }
+    patch.installment_no = n;
+  }
   if ('title' in changes) patch.title = (changes.title || '').trim() || null;
   if ('note' in changes) patch.note = (changes.note || '').trim() || null;
   if ('plannedBillDate' in changes) {
@@ -489,19 +526,31 @@ export async function updateInstallment(installmentId, changes = {}) {
     .update(patch)
     .eq('id', installmentId)
     .select();
-  if (error) throw trackingWriteError(error, 'แก้ไขงวดไม่สำเร็จ');
+  if (error) {
+    // unique(project_id, installment_no)
+    if (error.code === '23505' && 'installmentNo' in changes) throw new Error(`มีงวดที่ ${changes.installmentNo} อยู่แล้ว`);
+    throw trackingWriteError(error, 'แก้ไขงวดไม่สำเร็จ');
+  }
   return expectRows(data);
 }
 
-// Status + status_note + updated_by (+ billed_date) in ONE update, so the
-// audit trigger records the note and the actor together. Any status is allowed
-// (the DB does not restrict transitions); the caller confirms backward moves.
-// billed_date is not maintained by a trigger, so it is set here: today (or the
-// given date) when moving to 'billed', cleared when moving back to a
-// pre-billing status or cancelling, otherwise left as is.
+// Permanently deletes the installment; its checklist rows go with it (FK cascade).
+// The files themselves are not touched. Needs the DELETE policy from fix-2.
+export async function deleteInstallment(installmentId) {
+  const res = await supabase.from('project_installments').delete().eq('id', installmentId).select();
+  expectFix2Rows(res, 'ลบ');
+}
+
+// Status + status_note (+ billed_date) in ONE update. Saving the SAME status is
+// allowed and simply persists the note / billed date. Any status is allowed (the
+// DB does not restrict transitions); the caller confirms backward moves.
+// status_note is the installment's persistent "หมายเหตุสถานะ" (there is no
+// status history any more). billed_date is not maintained by a trigger, so it is
+// set here: the given date (default today) when the status is 'billed', cleared
+// for a pre-billing status or cancel, otherwise left as is.
 export async function setInstallmentStatus(installmentId, status, note, { billedDate } = {}) {
   if (!ALL_STATUSES.includes(status)) throw new Error('สถานะไม่ถูกต้อง');
-  const patch = { status, status_note: (note || '').trim() || null, updated_by: await getActorName() };
+  const patch = { status, status_note: (note || '').trim() || null, updated_by: null };
   if (status === 'billed') {
     const today = todayTH();
     const d = billedDate || today;
@@ -510,16 +559,6 @@ export async function setInstallmentStatus(installmentId, status, note, { billed
     patch.billed_date = d;
   } else if (CLEARS_BILLED_DATE.includes(status)) {
     patch.billed_date = null;
-    // Keep the old date in the event history: the column is about to be nulled,
-    // and status_note is what the audit trigger copies into installment_events.
-    const cur = await supabase.from('project_installments').select('billed_date').eq('id', installmentId).maybeSingle();
-    if (cur.error) throw trackingWriteError(cur.error, 'เปลี่ยนสถานะไม่สำเร็จ');
-    if (cur.data?.billed_date) {
-      const marker = `ล้างวันที่เบิกเดิม ${fmtThaiDate(cur.data.billed_date)}`;
-      if (!(patch.status_note || '').includes(marker)) {
-        patch.status_note = [patch.status_note, `(${marker})`].filter(Boolean).join(' ');
-      }
-    }
   }
   const { data, error } = await supabase
     .from('project_installments')
@@ -530,17 +569,6 @@ export async function setInstallmentStatus(installmentId, status, note, { billed
   return expectRows(data);
 }
 
-// Newest first. Written by trigger; read-only for the app.
-export function fetchInstallmentEvents(installmentId) {
-  return trackingRead(() =>
-    supabase
-      .from('installment_events')
-      .select('*')
-      .eq('installment_id', installmentId)
-      .order('created_at', { ascending: false })
-  );
-}
-
 // ---- checklist (installment_documents) ----
 
 // Rows + embedded file (name/ext/version info). file === null when nothing is attached.
@@ -549,7 +577,7 @@ export function fetchChecklist(installmentId) {
   return trackingRead(() =>
     supabase
       .from('installment_documents')
-      .select('*, file:files(id, project_id, name, ext, type, base_name, size, is_latest, created_at, uploader_name, storage_path)')
+      .select('*, file:files(id, project_id, name, ext, type, base_name, size, is_latest, created_at, storage_path)')
       .eq('installment_id', installmentId)
       .order('sort_order', { ascending: true })
       .order('created_at', { ascending: true })
@@ -598,7 +626,7 @@ export async function removeChecklistItem(itemId) {
 // file_id + attached_by in ONE update (the trigger checks the file is in the
 // same project and stamps attached_at).
 export async function attachFileToChecklistItem(itemId, fileId) {
-  const attached_by = await getActorName();
+  const attached_by = null;
   const { data, error } = await supabase
     .from('installment_documents')
     .update({ file_id: fileId, attached_by })
@@ -727,7 +755,9 @@ export async function updateProjectTracking(projectId, updates = {}) {
     await logActivity(
       projectId,
       'tracking_update',
-      `แก้ไขข้อมูลติดตามงาน: Project Co=${project_co || '-'}, สัญญา ${start || '-'} ถึง ${end || '-'}`
+      `แก้ไขข้อมูลติดตามงาน: Project Co=${project_co || '-'}, สัญญา ${start || '-'} ถึง ${end || '-'}`,
+      null,
+      { anonymous: true }
     );
   } catch (err) {
     console.warn('logActivity (tracking_update) failed:', err?.message);

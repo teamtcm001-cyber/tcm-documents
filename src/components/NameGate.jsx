@@ -40,7 +40,7 @@ export default function NameGate({ onDone, onCancel, initialValue = '' }) {
             />
           </div>
           <p className="muted small" style={{ marginTop: -8, marginBottom: 12 }}>
-            ใช้แสดงเป็นชื่อผู้อัปโหลด/ผู้ทำรายการในระบบเท่านั้น ไม่ใช่รหัสผ่าน
+            ใช้กรองดู "โปรเจกต์ของฉัน" เท่านั้น ไม่บันทึกชื่อลงในเอกสารหรือข้อมูลติดตามงาน (เก็บเฉพาะประวัติการเข้าใช้ระบบ) และไม่ใช่รหัสผ่าน
           </p>
           <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
             <Icon name="arrow-r" size={15} />
