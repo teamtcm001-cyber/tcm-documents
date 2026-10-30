@@ -109,7 +109,8 @@ export async function fetchChatIndex() {
 
 // { [fileId]: extracted text } for files that have any. Never throws (the column
 // may not exist on old databases): returns what it managed to read.
-export async function fetchFileContents() {
+// Optional { onError(error) } lets the chat tell "partial map" from "complete map".
+export async function fetchFileContents({ onError } = {}) {
   const out = {};
   const PAGE = 50;
   for (let from = 0; from < 5000; from += PAGE) {
@@ -119,7 +120,10 @@ export async function fetchFileContents() {
       .not('content_text', 'is', null)
       .order('created_at', { ascending: false })
       .range(from, from + PAGE - 1);
-    if (error) return out;
+    if (error) {
+      onError?.(error);
+      return out;
+    }
     for (const r of data || []) out[r.id] = r.content_text;
     if (!data || data.length < PAGE) break;
   }
