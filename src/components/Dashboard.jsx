@@ -60,6 +60,11 @@ function ProjectCard({ project, fileCount, latestDate, onOpen, onZip }) {
             <Icon name="clock" size={11} /> อัปเดต {latestDate ? fmtDate(latestDate) : '-'}
           </span>
           {project.status && <span style={{ color: 'var(--steel)' }}>{project.status}</span>}
+          {project.project_co && (
+            <span className="proj-co" title={`Project Co: ${project.project_co}`}>
+              <Icon name="user" size={11} /> Co: {project.project_co}
+            </span>
+          )}
         </div>
       </div>
       <div className="proj-actions">

@@ -832,9 +832,40 @@ input, textarea, select { font-family: inherit; }
   padding: 4px 6px; border-radius: 6px; background: none;
 }
 .trk-link-btn:hover { background: var(--steel-50); }
-button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus-visible {
+button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus-visible, .trk-tel:focus-visible {
   outline: 2px solid var(--steel); outline-offset: 2px;
 }
+
+/* Project Co name(s) + tap-to-call phone(s) (CoContact). Inline text that wraps
+   normally; .trk-sub makes every descendant span inline-flex, so reset that here. */
+.trk-co, .trk-sub .trk-co, .trk-sub .trk-co span { display: inline; }
+.trk-co { overflow-wrap: anywhere; }
+.trk-tel {
+  color: var(--steel); font-weight: 500; text-decoration: underline; text-underline-offset: 2px;
+  white-space: nowrap; padding: 2px 0;
+}
+.trk-tel:hover { color: var(--navy); }
+.drawer-head .trk-tel { color: #fff; }
+.drawer-head .trk-tel:hover { color: rgba(255,255,255,0.85); }
+.drawer-head .trk-tel:focus-visible, .drawer-co-edit:focus-visible { outline-color: #fff; }
+.drawer-head .info.drawer-co { margin-top: 6px; align-items: center; gap: 6px 10px; }
+.drawer-head .info.drawer-co > span { display: block; min-width: 0; }
+.drawer-head .info .trk-co, .drawer-head .info .trk-co span { display: inline; }
+.drawer-head .info.drawer-co svg { vertical-align: -2px; margin-right: 4px; }
+.drawer-co-edit {
+  background: none; color: rgba(255,255,255,0.9); font-size: 12px; text-decoration: underline;
+  text-underline-offset: 2px; padding: 2px 4px; border-radius: 4px; cursor: pointer;
+}
+.drawer-co-edit:hover { color: #fff; }
+.proj-meta .info .proj-co {
+  display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.proj-co svg { vertical-align: -2px; margin-right: 2px; }
+.trk-facts .trk-co { display: inline; }
+/* "Project Co: name phone" line on the overview card: normal text flow so the label,
+   names and numbers wrap together instead of becoming separate flex columns. */
+.trk-sub .trk-co-line { display: block; min-width: 0; max-width: 100%; }
+.trk-co-line svg { vertical-align: -2px; margin-right: 4px; }
 
 .trk-pop-wrap { position: relative; display: inline-block; }
 .trk-pop {
@@ -865,6 +896,16 @@ button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus
 .trk-tone-bad { background: #FDECEA; color: #B42318; border-color: #F6BDB7; }
 .trk-tone-info { background: var(--steel-50); color: #285887; border-color: #BFD3EA; }
 .trk-tone-mute { background: var(--gray-100); color: #4B5563; border-color: var(--gray-200); }
+.trk-status-badge { white-space: normal; }
+.trk-edit .field #trk-status { max-width: 320px; }
+/* status picker inside the dark drawer header pill */
+.drawer-status-select {
+  background: transparent; color: inherit; border: 1px solid rgba(255,255,255,0.35); border-radius: 6px;
+  font: inherit; padding: 1px 4px; max-width: 60vw; cursor: pointer;
+}
+.drawer-status-select option { color: #1f2937; background: #fff; }
+.drawer-status-select:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.drawer-status-select:disabled { opacity: 0.6; cursor: progress; }
 .trk-text-ok { color: #166534; }
 .trk-text-bad { color: #B42318; font-weight: 500; }
 .trk-text-info { color: var(--navy); }

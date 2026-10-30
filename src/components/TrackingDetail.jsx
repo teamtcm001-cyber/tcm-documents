@@ -2,11 +2,14 @@ import { useEffect, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import {
-  fetchProjectTrackingRow, fetchProgressHistory, fetchInstallments, updateProjectTracking,
+  fetchProjectTrackingRow, fetchProgressHistory, fetchInstallments, updateProjectTracking, updateProjectStatus,
 } from '../api/supabase.js'
 import { getLocalName } from '../utils/localIdentity.js'
-import { computeHealth, fmtThaiDate, isIsoDate, isSaneDate, isMine, INSANE_DATE_MESSAGE } from '../utils/tracking.js'
-import { HealthChip, ToneBadge, NotInstalledNotice, ErrorNotice } from './TrackingBits.jsx'
+import {
+  computeHealth, fmtThaiDate, isIsoDate, isSaneDate, isMine, INSANE_DATE_MESSAGE, phoneError, normalizePhones,
+  statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM,
+} from '../utils/tracking.js'
+import { HealthChip, ToneBadge, ProjectStatusBadge, NotInstalledNotice, ErrorNotice, CoContact } from './TrackingBits.jsx'
 import TrackingProgress from './TrackingProgress.jsx'
 import TrackingInstallments from './TrackingInstallments.jsx'
 
@@ -17,28 +20,99 @@ function ProjectHeader({ row, health, onSaved }) {
   const [start, setStart] = useState('')
   const [end, setEnd] = useState('')
   const [co, setCo] = useState('')
+  const [phone, setPhone] = useState('')
+  const [projStatus, setProjStatus] = useState('')
+  // Snapshot of what the form was opened with. Everything below compares against THIS (not the
+  // live `row`, which can be refreshed while the form is open), and save() sends only fields
+  // that differ from it, so an untouched field can never overwrite someone else's newer value.
+  const [base, setBase] = useState(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
   const startEdit = () => {
-    setStart(row.start_date || '')
-    setEnd(row.end_date || '')
-    setCo(row.project_co || '')
+    const snap = {
+      start: row.start_date || '',
+      end: row.end_date || '',
+      co: row.project_co || '',
+      // undefined = the phone could not be read: it stays locked and is never sent
+      phone: row.project_co_phone === undefined ? undefined : row.project_co_phone || '',
+      status: row.project_status || '',
+    }
+    setBase(snap)
+    setStart(snap.start)
+    setEnd(snap.end)
+    setCo(snap.co)
+    setPhone(snap.phone ?? '')
+    setProjStatus(snap.status)
     setError('')
     setEditing(true)
   }
 
+  const phoneUnknown = !!base && base.phone === undefined
+
   const save = async (e) => {
     e.preventDefault()
     setError('')
-    if (start && !isIsoDate(start)) return setError('วันเริ่มสัญญาไม่ถูกต้อง')
-    if (end && !isIsoDate(end)) return setError('วันสิ้นสุดสัญญาไม่ถูกต้อง')
-    if (start && !isSaneDate(start)) return setError(`วันเริ่มสัญญา: ${INSANE_DATE_MESSAGE}`)
-    if (end && !isSaneDate(end)) return setError(`วันสิ้นสุดสัญญา: ${INSANE_DATE_MESSAGE}`)
-    if (start && end && end < start) return setError('วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มสัญญา')
+    if (!base) return
+    // typed-in junk (e.g. ",,;") is rejected even though it would normalise to "no phone"
+    if (!phoneUnknown && phone.trim() !== (base.phone || '').trim()) {
+      const phoneMsg = phoneError(phone)
+      if (phoneMsg) return setError(phoneMsg)
+    }
+    const changed = {}
+    if (start !== base.start) changed.start_date = start
+    if (end !== base.end) changed.end_date = end
+    if (co.trim() !== base.co.trim()) changed.project_co = co
+    if (!phoneUnknown && (normalizePhones(phone) || '') !== (normalizePhones(base.phone) || '')) {
+      changed.project_co_phone = phone
+    }
+    const statusChanged = projStatus !== base.status
+    const trackingChanged = Object.keys(changed).length > 0
+
+    // nothing touched: no request at all
+    if (!statusChanged && !trackingChanged) {
+      setEditing(false)
+      return
+    }
+
+    if (statusChanged && projStatus === CLOSED_PROJECT_STATUS && !window.confirm(CLOSE_PROJECT_CONFIRM)) return
+
+    // Only the status changed: save just that. The stored contract dates / Co are
+    // neither re-validated nor rewritten, so an old project with odd dates can still be closed.
+    if (statusChanged && !trackingChanged) {
+      setSaving(true)
+      try {
+        await updateProjectStatus(row.project_id, projStatus, { previousStatus: base.status })
+        toast(`เปลี่ยนสถานะโครงการเป็น "${projStatus}" เรียบร้อย`)
+        setEditing(false)
+        await onSaved()
+      } catch (err) {
+        setError(err.message)
+      } finally {
+        setSaving(false)
+      }
+      return
+    }
+
+    // validate only what the user changed
+    if ('start_date' in changed) {
+      if (start && !isIsoDate(start)) return setError('วันเริ่มสัญญาไม่ถูกต้อง')
+      if (start && !isSaneDate(start)) return setError(`วันเริ่มสัญญา: ${INSANE_DATE_MESSAGE}`)
+    }
+    if ('end_date' in changed) {
+      if (end && !isIsoDate(end)) return setError('วันสิ้นสุดสัญญาไม่ถูกต้อง')
+      if (end && !isSaneDate(end)) return setError(`วันสิ้นสุดสัญญา: ${INSANE_DATE_MESSAGE}`)
+    }
+    if (('start_date' in changed || 'end_date' in changed) && start && end && end < start) {
+      return setError('วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มสัญญา')
+    }
     setSaving(true)
     try {
-      await updateProjectTracking(row.project_id, { start_date: start, end_date: end, project_co: co })
+      await updateProjectTracking(row.project_id, {
+        ...changed,
+        // untouched status (incl. a legacy value) is never sent, so it cannot be overwritten
+        ...(statusChanged ? { project_status: projStatus, previous_status: base.status } : {}),
+      })
       toast('บันทึกข้อมูลโครงการเรียบร้อย')
       setEditing(false)
       await onSaved()
@@ -60,12 +134,12 @@ function ProjectHeader({ row, health, onSaved }) {
           <h2 className="trk-head-name">{row.project_name}</h2>
           <div className="trk-sub">
             <span>{row.project_code}</span>
-            {row.project_status && <span>{row.project_status}</span>}
+            <ProjectStatusBadge status={row.project_status} />
           </div>
         </div>
         {!editing && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={startEdit}>
-            <Icon name="pen" size={13} /> แก้ไขสัญญา / Project Co
+            <Icon name="pen" size={13} /> แก้ไขสัญญา / Project Co / สถานะ
           </button>
         )}
       </div>
@@ -79,6 +153,17 @@ function ProjectHeader({ row, health, onSaved }) {
       {editing ? (
         <form className="trk-edit" onSubmit={save} noValidate>
           <div className="trk-form-row">
+            <div className="field" style={{ flex: '1 1 100%' }}>
+              <label htmlFor="trk-status">สถานะโครงการ</label>
+              <select id="trk-status" value={projStatus} onChange={(e) => setProjStatus(e.target.value)}>
+                {statusOptions(base?.status).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {projStatus === CLOSED_PROJECT_STATUS && base?.status !== CLOSED_PROJECT_STATUS ? (
+                <span className="muted small">ปิดโครงการ: ไม่นับเงื่อนไข % ความคืบหน้า/การอัปเดต % (ยังตรวจงวดเบิกตามปกติ)</span>
+              ) : null}
+            </div>
             <div className="field" style={{ flex: '1 1 180px' }}>
               <label htmlFor="trk-start">วันเริ่มสัญญา</label>
               <input id="trk-start" type="date" value={start} onChange={(e) => setStart(e.target.value)} />
@@ -97,6 +182,25 @@ function ProjectHeader({ row, health, onSaved }) {
                   ใช้ชื่อของฉัน ("{localName}")
                 </button>
               )}
+            </div>
+            <div className="field" style={{ flex: '2 1 240px' }}>
+              <label htmlFor="trk-co-phone">เบอร์ติดต่อ</label>
+              <input
+                id="trk-co-phone"
+                type="text"
+                inputMode="tel"
+                autoComplete="off"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="081-234-5678 (หลายคนคั่นด้วย ,)"
+                disabled={phoneUnknown}
+                aria-describedby="trk-co-phone-hint"
+              />
+              <span className={`small ${phoneUnknown ? 'trk-text-bad' : 'muted'}`} id="trk-co-phone-hint">
+                {phoneUnknown
+                  ? 'โหลดเบอร์ไม่สำเร็จ — รีเฟรชก่อนแก้ไข'
+                  : 'เรียงลำดับเดียวกับชื่อ Project Co · ใส่ "ต่อ 12" สำหรับเบอร์ต่อภายในได้'}
+              </span>
             </div>
           </div>
           {error && (
@@ -118,7 +222,7 @@ function ProjectHeader({ row, health, onSaved }) {
           <div>
             <span className="muted small">Project Co</span>
             <div>
-              {row.project_co || <span className="muted">ยังไม่ระบุ</span>} {mine && <ToneBadge tone="info">คุณ</ToneBadge>}
+              <CoContact co={row.project_co} phone={row.project_co_phone} /> {mine && <ToneBadge tone="info">คุณ</ToneBadge>}
             </div>
           </div>
           <div>
@@ -148,7 +252,7 @@ function ProjectHeader({ row, health, onSaved }) {
   )
 }
 
-export default function TrackingDetail({ projectId, onBack, onOpenUpload }) {
+export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProjectChanged }) {
   const [status, setStatus] = useState('loading') // loading | ready | notInstalled | missing | error
   const [errMsg, setErrMsg] = useState('')
   const [row, setRow] = useState(null)
@@ -228,7 +332,14 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload }) {
     const health = computeHealth(row, { readyToBillDays: rtbDays >= 0 ? rtbDays : null })
     body = (
       <>
-        <ProjectHeader row={row} health={health} onSaved={refreshRow} />
+        <ProjectHeader
+          row={row}
+          health={health}
+          onSaved={async () => {
+            await refreshRow()
+            onProjectChanged?.() // let the app reload home lists / drawer data
+          }}
+        />
         <div className="trk-detail-grid">
           <TrackingProgress row={row} history={history} onSaved={async () => { await Promise.all([refreshRow(), refreshHistory()]) }} />
           <TrackingInstallments

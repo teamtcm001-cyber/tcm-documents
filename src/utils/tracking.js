@@ -184,6 +184,30 @@ export const READY_TO_BILL_DAYS = 7
 export const DUE_SOON_DAYS = 7
 export const CLOSED_PROJECT_STATUS = 'ปิดโครงการ'
 
+// ---------- project status (projects.status is free text in the DB) ----------
+// The values the app lets a user choose, in display order. Single source of truth:
+// the new-project modal, the tracking edit form and updateProjectStatus all use it.
+// The first entry is the default (and the DB column default).
+// Only two values can be chosen/written. Legacy values already stored (e.g. 'อนุมัติแบบ',
+// null, free text) are still displayed and preserved; see statusOptions().
+export const PROJECT_STATUSES = ['กำลังดำเนินการ', CLOSED_PROJECT_STATUS]
+export const DEFAULT_PROJECT_STATUS = PROJECT_STATUSES[0]
+
+export const CLOSE_PROJECT_CONFIRM =
+  'โครงการที่ปิดแล้วจะไม่ถูกนับเงื่อนไขความคืบหน้า/การอัปเดต % ในสถานะแดง/เหลือง (ยังตรวจงวดเบิกตามปกติ)\n\nยืนยันปิดโครงการ?'
+
+// Options for a status <select>. An existing value that is not in PROJECT_STATUSES
+// (legacy / typo / empty) is kept as an extra "(ปัจจุบัน)" option so merely opening and
+// saving a form can never overwrite it silently.
+export function statusOptions(current) {
+  const cur = current == null ? '' : String(current)
+  const opts = PROJECT_STATUSES.map((s) => ({ value: s, label: s }))
+  if (!PROJECT_STATUSES.includes(cur)) {
+    opts.unshift({ value: cur, label: `${cur || 'ไม่ระบุ'} (ปัจจุบัน)` })
+  }
+  return opts
+}
+
 export const HEALTH_LABEL = { red: 'ต้องดำเนินการ', amber: 'ควรติดตาม', green: 'ปกติ' }
 
 // row: a project_tracking_overview row (+ optional ready_to_bill_days).
@@ -247,14 +271,85 @@ export function nextInstallmentLine(row) {
 const normName = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase()
 
 // project_co may list several coordinators separated by , / ; & or "และ"
+// (display form: trimmed, original case). Shared by isMine and the contact display.
+export function splitCoNames(projectCo) {
+  if (!projectCo) return []
+  return String(projectCo)
+    .split(/[,/;&]|\sและ\s/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
 export function isMine(projectCo, localName) {
   const me = normName(localName)
   if (!me || !projectCo) return false
-  return projectCo
-    .split(/[,/;&]|\sและ\s/)
-    .map(normName)
+  return splitCoNames(projectCo).map(normName).filter(Boolean).includes(me)
+}
+
+// ---------- Project Co contact phone (projects.project_co_phone) ----------
+// Free text, plain. Several numbers separated by "," ";" or "/" (a "/" followed by a 1-3 digit
+// tail stays part of the number: "02-123-4567/8"), in the same order as the names in project_co.
+export const PHONE_MAX_LENGTH = 80
+export const PHONE_INVALID_MESSAGE =
+  'เบอร์โทรไม่ถูกต้อง — ใช้ได้เฉพาะตัวเลข ช่องว่าง + - ( ) . , ; / และคำว่า "ต่อ" (เช่น 081-234-5678, 02-123-4567 ต่อ 12)'
+export const PHONE_TOO_LONG_MESSAGE = `เบอร์โทรไม่ถูกต้อง — ยาวเกิน ${PHONE_MAX_LENGTH} ตัวอักษร`
+
+// Entries are separated by "," or ";" or a "/" (same as splitCoNames splits names, so the
+// name/phone pairing stays aligned). Exception: a "/" followed by 1-3 digits and then the end
+// or another separator is a short extension of the SAME number ("02-123-4567/8").
+const PHONE_SPLIT = /[,;]|\s*\/(?!\s*\d{1,3}\s*(?:[,;/]|$))\s*/
+
+export function splitPhones(phone) {
+  if (!phone) return []
+  return String(phone)
+    .normalize('NFC')
+    .split(PHONE_SPLIT)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
-    .includes(me)
+}
+
+// '' when OK (empty is OK), otherwise a Thai message.
+export function phoneError(raw) {
+  const s = String(raw || '').normalize('NFC').trim()
+  if (!s) return ''
+  if (s.length > PHONE_MAX_LENGTH) return PHONE_TOO_LONG_MESSAGE
+  if (!/^[0-9\s+\-().,;/]*$/.test(s.replace(/ต่อ/g, ' '))) return PHONE_INVALID_MESSAGE
+  const entries = splitPhones(s)
+  if (entries.length === 0 || entries.some((e) => !/\d/.test(e))) return PHONE_INVALID_MESSAGE
+  return ''
+}
+
+// Canonical stored form: entries trimmed, joined with ", ". Empty -> null.
+export function normalizePhones(raw) {
+  const entries = splitPhones(raw)
+  return entries.length ? entries.join(', ') : null
+}
+
+// href for one displayed number: digits and a leading + only. Anything after "ต่อ" or after
+// a "/" (short extension, "02-123-4567/8") is dropped because a plain tel: link cannot carry
+// it. For an international "+" number a "(0)" trunk-prefix group is dropped as well
+// ("+66 (0)81-234-5678" dials +66812345678).
+export function telHref(entry) {
+  const main = String(entry || '').split('ต่อ')[0].split('/')[0]
+  const intl = /^\s*\(?\s*\+/.test(main)
+  const cleaned = intl ? main.replace(/\(\s*0\s*\)/, '') : main
+  const digits = cleaned.replace(/\D/g, '')
+  return digits ? `tel:${intl ? '+' : ''}${digits}` : ''
+}
+
+// -> { pairs: [{name, phone}], names: [], phones: [], paired: boolean }
+// Pairs name i with phone i ONLY when both lists have the same length; otherwise
+// nothing is paired (never invent a pairing).
+export function coContacts(projectCo, projectCoPhone) {
+  const names = splitCoNames(projectCo)
+  const phones = splitPhones(projectCoPhone)
+  const paired = names.length > 0 && names.length === phones.length
+  return {
+    names,
+    phones,
+    paired,
+    pairs: paired ? names.map((name, i) => ({ name, phone: phones[i] })) : [],
+  }
 }
 
 // ---------- progress trend ----------

@@ -193,6 +193,7 @@ function MainApp({ user, onChangeName }) {
           projectId={trackingProjectId}
           onSelectProject={setTrackingProjectId}
           onOpenUpload={() => setUploadOpen(true)}
+          onProjectChanged={refresh}
         />
       ) : (
         <>
@@ -227,6 +228,10 @@ function MainApp({ user, onChangeName }) {
           onClose={() => setDrawerProject(null)}
           onChanged={refresh}
           onOpenTracking={openTracking}
+          onStatusChanged={(row) => {
+            setDrawerProject((p) => (p ? { ...p, ...row } : p))
+            refresh()
+          }}
         />
       )}
 

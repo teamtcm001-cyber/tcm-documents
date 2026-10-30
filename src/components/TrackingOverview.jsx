@@ -7,6 +7,7 @@ import {
 } from '../utils/tracking.js'
 import {
   HealthChip, ToneBadge, ProgressMeter, MeterLegend, NotInstalledNotice, ErrorNotice, PartialDataNotice, CriteriaPopover,
+  CoContact, ProjectStatusBadge,
 } from './TrackingBits.jsx'
 
 function ProjectRow({ item, mineName, onOpen }) {
@@ -40,8 +41,9 @@ function ProjectRow({ item, mineName, onOpen }) {
           <div className="trk-name">{row.project_name}</div>
           <div className="trk-sub">
             <span>{row.project_code}</span>
-            <span>
-              <Icon name="user" size={12} /> Project Co: {row.project_co || 'ยังไม่ระบุ'}
+            <ProjectStatusBadge status={row.project_status} hideNormal />
+            <span className="trk-co-line">
+              <Icon name="user" size={12} /> Project Co: <CoContact co={row.project_co} phone={row.project_co_phone} />
             </span>
             {mine && <ToneBadge tone="info">โปรเจกต์ของฉัน</ToneBadge>}
           </div>
@@ -104,10 +106,30 @@ function ProjectRow({ item, mineName, onOpen }) {
   )
 }
 
+const HIDE_CLOSED_KEY = 'tcm_trk_hide_closed'
+const readHideClosed = () => {
+  try {
+    return localStorage.getItem(HIDE_CLOSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 export default function TrackingOverview({ onOpenProject }) {
   const [state, setState] = useState({ loading: true, rows: [], notInstalled: false, error: null, partial: false })
   const [onlyMine, setOnlyMine] = useState(false)
   const [onlyAction, setOnlyAction] = useState(false)
+  const [hideClosed, setHideClosed] = useState(readHideClosed)
+
+  const toggleHideClosed = () => {
+    const next = !hideClosed
+    setHideClosed(next)
+    try {
+      localStorage.setItem(HIDE_CLOSED_KEY, next ? '1' : '0')
+    } catch {
+      /* private mode / storage blocked: the choice just won't persist */
+    }
+  }
   const localName = getLocalName()
 
   const load = async () => {
@@ -131,18 +153,30 @@ export default function TrackingOverview({ onOpenProject }) {
     [state.rows]
   )
 
+  // A closed project that is still red (overdue installment) needs action, so it is never
+  // hidden. Only closed projects that are not red can be hidden.
+  const hideable = ({ health }) => health.closed && health.level !== 'red'
+  const hideableCount = useMemo(() => items.filter(hideable).length, [items])
+
+  // "Hide closed" removes those projects from everything below: the banner counts,
+  // the chip counts and the list all describe the same set of projects.
+  const scoped = useMemo(
+    () => (hideClosed ? items.filter((it) => !hideable(it)) : items),
+    [items, hideClosed]
+  )
+
   const summary = useMemo(() => {
     const s = { red: 0, amber: 0, green: 0, overdue: 0 }
-    items.forEach(({ row, health }) => {
+    scoped.forEach(({ row, health }) => {
       s[health.level] += 1
       s.overdue += row.installments_overdue || 0
     })
     return s
-  }, [items])
+  }, [scoped])
 
-  const myCount = items.filter(({ row }) => isMine(row.project_co, localName)).length
+  const myCount = scoped.filter(({ row }) => isMine(row.project_co, localName)).length
 
-  const visible = items
+  const visible = scoped
     .filter(({ row }) => !onlyMine || isMine(row.project_co, localName))
     .filter(({ health }) => !onlyAction || health.level !== 'green')
     .sort(
@@ -212,6 +246,16 @@ export default function TrackingOverview({ onOpenProject }) {
               >
                 <Icon name="alert" size={12} /> เฉพาะที่ต้องดำเนินการ ({summary.red + summary.amber})
               </button>
+              {(hideableCount > 0 || hideClosed) && (
+                <button
+                  className={`filter-chip ${hideClosed ? 'on' : ''}`}
+                  aria-pressed={hideClosed}
+                  onClick={toggleHideClosed}
+                  title="ซ่อนโครงการสถานะ ปิดโครงการ ออกจากรายการและตัวเลขสรุป (ข้อมูลไม่ถูกลบ) — ยกเว้นโครงการที่ยังมีงวดเลยกำหนดเบิก (สถานะแดง) จะยังแสดงอยู่"
+                >
+                  <Icon name="folder" size={12} /> ซ่อนโครงการที่ปิดแล้ว ({hideableCount})
+                </button>
+              )}
               <CriteriaPopover />
               <span className="muted small trk-toolbar-note">
                 ใครก็แก้ได้ทุกโครงการ — "โปรเจกต์ของฉัน" เป็นเพียงตัวกรองตามชื่อ ไม่ใช่การจำกัดสิทธิ์

@@ -4,7 +4,7 @@ import TrackingDetail from './TrackingDetail.jsx'
 
 // "ติดตามงาน" tab: cross-project overview, or one project's detail when
 // `projectId` is set. App owns the selection so the project drawer can deep-link here.
-export default function Tracking({ projectId, onSelectProject, onOpenUpload }) {
+export default function Tracking({ projectId, onSelectProject, onOpenUpload, onProjectChanged }) {
   useEffect(() => {
     window.scrollTo(0, 0)
   }, [projectId])
@@ -16,6 +16,7 @@ export default function Tracking({ projectId, onSelectProject, onOpenUpload }) {
         projectId={projectId}
         onBack={() => onSelectProject(null)}
         onOpenUpload={onOpenUpload}
+        onProjectChanged={onProjectChanged}
       />
     )
   }

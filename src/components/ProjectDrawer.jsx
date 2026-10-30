@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
-import { fetchFiles, deleteFile, downloadFile, deleteProject, getFileBlob, updateFileContent } from '../api/supabase.js'
+import {
+  fetchFiles, deleteFile, downloadFile, deleteProject, getFileBlob, updateFileContent, updateProjectStatus,
+} from '../api/supabase.js'
+import { statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM } from '../utils/tracking.js'
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
 import { extractTextFromBlobDetailed, RESULT } from '../utils/textExtract.js'
 import PreviewModal from './PreviewModal.jsx'
+import { CoContact } from './TrackingBits.jsx'
 
 function FileRow({ file, onDelete, onDownload, onPreview }) {
   const color = TYPE_COLOR[file.type] || '#6B7280'
@@ -51,7 +55,8 @@ function FileRow({ file, onDelete, onDownload, onPreview }) {
   )
 }
 
-export default function ProjectDrawer({ project, refreshKey, onClose, onChanged, onOpenTracking }) {
+export default function ProjectDrawer({ project, refreshKey, onClose, onChanged, onOpenTracking, onStatusChanged }) {
+  const [statusSaving, setStatusSaving] = useState(false)
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -99,6 +104,23 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       onChanged?.()
     } catch (err) {
       toast('ลบไม่สำเร็จ', 'err')
+    }
+  }
+
+  const handleStatusChange = async (e) => {
+    const next = e.target.value
+    const prev = project.status || ''
+    if (next === prev) return
+    if (next === CLOSED_PROJECT_STATUS && !window.confirm(CLOSE_PROJECT_CONFIRM)) return
+    setStatusSaving(true)
+    try {
+      const row = await updateProjectStatus(project.id, next, { previousStatus: prev })
+      toast(`เปลี่ยนสถานะโครงการเป็น "${next}" เรียบร้อย`)
+      onStatusChanged?.(row)
+    } catch (err) {
+      toast(err.message || 'เปลี่ยนสถานะโครงการไม่สำเร็จ', 'err')
+    } finally {
+      setStatusSaving(false)
     }
   }
 
@@ -214,7 +236,23 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                 letterSpacing: '0.04em',
               }}
             >
-              {project.code} · {project.status || 'active'}
+              {project.code} ·{' '}
+              {onStatusChanged ? (
+                <select
+                  className="drawer-status-select"
+                  aria-label="สถานะโครงการ"
+                  value={project.status || ''}
+                  onChange={handleStatusChange}
+                  disabled={statusSaving}
+                  title="เปลี่ยนสถานะโครงการ"
+                >
+                  {statusOptions(project.status).map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              ) : (
+                project.status || 'active'
+              )}
             </div>
             <button className="close" onClick={onClose}>
               <Icon name="close" size={20} />
@@ -234,6 +272,24 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
               <Icon name="layers" size={13} /> {fmtSize(totalSize)}
             </span>
           </div>
+          {(project.project_co || project.project_co_phone) && (
+            <div className="info drawer-co" data-testid="drawer-co">
+              <span>
+                <Icon name="user" size={13} /> Project Co:{' '}
+                <CoContact co={project.project_co} phone={project.project_co_phone} empty={null} />
+              </span>
+              {onOpenTracking && (
+                <button
+                  type="button"
+                  className="drawer-co-edit"
+                  onClick={() => onOpenTracking(project)}
+                  title="เปิดหน้าติดตามงานเพื่อแก้ไขชื่อ Project Co และเบอร์ติดต่อ"
+                >
+                  ตั้งค่า
+                </button>
+              )}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn btn-sm btn-primary" onClick={() => toast('Zip ทั้งโครงการ ยังไม่รองรับ', 'err')}>
               <Icon name="zip" size={13} /> Zip ทั้งโครงการ

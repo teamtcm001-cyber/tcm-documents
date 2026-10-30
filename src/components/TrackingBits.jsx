@@ -2,10 +2,57 @@ import { useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { TRACKING_NOT_INSTALLED_MESSAGE } from '../api/supabase.js'
 import {
-  HEALTH_LABEL, STALE_DAYS, BEHIND_POINTS, READY_TO_BILL_DAYS, DUE_SOON_DAYS,
+  HEALTH_LABEL, STALE_DAYS, BEHIND_POINTS, READY_TO_BILL_DAYS, DUE_SOON_DAYS, coContacts, telHref,
+  CLOSED_PROJECT_STATUS, DEFAULT_PROJECT_STATUS,
 } from '../utils/tracking.js'
 
 // Small presentational pieces shared by the tracking screens.
+
+// One tap-to-call number. Clicks/keys must not reach a clickable parent (the
+// overview card opens the project on click and on Enter/Space).
+function PhoneLink({ entry }) {
+  const href = telHref(entry)
+  if (!href) return <>{entry}</>
+  const stop = (e) => e.stopPropagation()
+  return (
+    <a className="trk-tel" href={href} onClick={stop} onKeyDown={stop} title={`โทร ${entry}`}>
+      {entry}
+    </a>
+  )
+}
+
+// Project Co name(s) + contact phone(s), formatted identically everywhere.
+//  * same number of names and phones -> paired:  "แพรว 081-… · สมชาย 089-…"
+//  * otherwise                       -> names, then the phones as listed
+//  * only a name / only a phone      -> just that
+//  * neither                         -> `empty` (default "ยังไม่ระบุ"; pass null to render nothing)
+export function CoContact({ co, phone, empty = 'ยังไม่ระบุ', namesOnly = false }) {
+  const { names, phones, paired, pairs } = coContacts(co, phone)
+  if (namesOnly) return names.length ? <span className="trk-co">{names.join(', ')}</span> : null
+  if (names.length === 0 && phones.length === 0) {
+    return empty == null ? null : <span className="trk-co muted">{empty}</span>
+  }
+  const sep = (key) => <span key={key} className="trk-co-sep" aria-hidden="true"> · </span>
+  const parts = []
+  if (paired) {
+    pairs.forEach((p, i) => {
+      if (i) parts.push(sep(`s${i}`))
+      parts.push(
+        <span key={`i${i}`} className="trk-co-item">
+          {p.name}{' '}<PhoneLink entry={p.phone} />
+        </span>
+      )
+    })
+  } else {
+    if (names.length) parts.push(<span key="n" className="trk-co-item">{names.join(', ')}</span>)
+    if (names.length && phones.length) parts.push(sep('sep'))
+    phones.forEach((p, i) => {
+      if (i) parts.push(<span key={`c${i}`}>, </span>)
+      parts.push(<PhoneLink key={`p${i}`} entry={p} />)
+    })
+  }
+  return <span className="trk-co">{parts}</span>
+}
 
 const HEALTH_ICON = { red: 'alert', amber: 'alert', green: 'circle-check' }
 
@@ -23,6 +70,25 @@ export function ToneBadge({ tone = 'mute', children, title }) {
   return (
     <span className={`trk-badge trk-tone-${tone}`} title={title}>
       {children}
+    </span>
+  )
+}
+
+// Project status (projects.status). Closed = grey, any other non-default value
+// (e.g. a legacy "อนุมัติแบบ") = blue. `hideNormal` hides the default status so cards
+// only call out the unusual ones. Text is always shown, never colour alone.
+export function ProjectStatusBadge({ status, hideNormal = false }) {
+  const s = (status || '').trim()
+  if (!s) return null
+  if (hideNormal && s === DEFAULT_PROJECT_STATUS) return null
+  const closed = s === CLOSED_PROJECT_STATUS
+  return (
+    <span
+      className={`trk-badge trk-status-badge ${closed ? 'trk-tone-mute' : 'trk-tone-info'}`}
+      data-testid="project-status"
+      title={closed ? 'โครงการปิดแล้ว — ไม่นับเงื่อนไข % ความคืบหน้า/การอัปเดต (ยังตรวจงวดเบิก)' : `สถานะโครงการ: ${s}`}
+    >
+      {closed && <Icon name="check" size={11} />} {s}
     </span>
   )
 }

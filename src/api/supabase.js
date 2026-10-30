@@ -3,6 +3,7 @@ import { uploadToDrive, driveFileUrl } from '../utils/googleDrive.js';
 import { getLocalName } from '../utils/localIdentity.js';
 import {
   todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, ALL_STATUSES, CLEARS_BILLED_DATE,
+  phoneError, normalizePhones, PROJECT_STATUSES,
 } from '../utils/tracking.js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -50,17 +51,44 @@ export async function fetchProjects() {
   return data || [];
 }
 
+// projects.project_co_phone is added by scripts/project-tracking-fix-3.sql. Until
+// that has been run, any write that includes the column fails with 42703
+// (Postgres) / PGRST204 (PostgREST schema cache); both messages name the column.
+export const PHONE_COLUMN_MISSING_MESSAGE =
+  'บันทึกเบอร์ติดต่อไม่ได้ เพราะฐานข้อมูลยังไม่มีคอลัมน์เบอร์ติดต่อ — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql ใน Supabase SQL Editor ก่อน (ข้อมูลที่แก้ไขยังไม่ถูกบันทึก)';
+
+export function isPhoneColumnMissing(error) {
+  if (!error) return false;
+  const msg = error.message || '';
+  if (/project_co_phone/i.test(msg)) return true;
+  return !msg && ['42703', 'PGRST204'].includes(String(error.code || ''));
+}
+
+// Returns the created row. If the row was created WITHOUT the phone because the
+// column does not exist yet, the returned row carries `_phoneNotSaved: true` so the
+// caller can tell the user (creating the project itself never fails for that).
 export async function createProject(projectData) {
   const user = await getCurrentUser();
-  const { data, error } = await supabase
-    .from('projects')
-    .insert([{
-      ...projectData,
-      created_by: user.id
-    }])
-    .select();
-  if (error) throw error;
-  return data?.[0];
+  const insert = (fields) =>
+    supabase
+      .from('projects')
+      .insert([{ ...fields, created_by: user.id }])
+      .select();
+
+  const { project_co_phone, ...rest } = projectData || {};
+  const phone = normalizePhones(project_co_phone);
+  if (!phone) {
+    const { data, error } = await insert(rest);
+    if (error) throw error;
+    return data?.[0];
+  }
+
+  const first = await insert({ ...rest, project_co_phone: phone });
+  if (!first.error) return first.data?.[0];
+  if (!isPhoneColumnMissing(first.error)) throw first.error;
+  const retry = await insert(rest);
+  if (retry.error) throw retry.error;
+  return retry.data?.[0] ? { ...retry.data[0], _phoneNotSaved: true } : retry.data?.[0];
 }
 
 export async function updateProject(projectId, updates) {
@@ -373,6 +401,10 @@ function expectFix2Rows({ data, error }, verb) {
 // If that second query fails the main data is still returned, but with
 // `partial: true` so the UI can warn that the health status may be incomplete
 // (the aging rule cannot fire without it).
+//
+// The view has project_co but not project_co_phone (scripts/project-tracking-fix-3.sql
+// adds that column to `projects` only), so phones are merged in from one light
+// query on `projects` (fetchProjectContacts, which never throws).
 export function fetchTrackingOverview() {
   return trackingRead(async () => {
     const main = await supabase
@@ -381,10 +413,13 @@ export function fetchTrackingOverview() {
       .order('project_code', { ascending: true });
     if (main.error) return main;
 
-    const aging = await supabase
-      .from('installment_summary')
-      .select('project_id, days_in_status')
-      .eq('status', 'ready_to_bill');
+    const [aging, contacts] = await Promise.all([
+      supabase
+        .from('installment_summary')
+        .select('project_id, days_in_status')
+        .eq('status', 'ready_to_bill'),
+      fetchProjectContacts(),
+    ]);
     const maxDays = {};
     if (aging.error) {
       console.warn('fetchTrackingOverview: aging query failed:', aging.error.message);
@@ -395,18 +430,55 @@ export function fetchTrackingOverview() {
       }
     }
     return {
-      data: (main.data || []).map((r) => ({ ...r, ready_to_bill_days: maxDays[r.project_id] ?? null })),
+      data: (main.data || []).map((r) => ({
+        ...r,
+        ready_to_bill_days: maxDays[r.project_id] ?? null,
+        project_co_phone: contacts[r.project_id]?.project_co_phone ?? null,
+      })),
       error: null,
       partial: !!aging.error,
     };
   });
 }
 
+// { [project_id]: { project_co, project_co_phone } } straight from `projects`.
+// NEVER throws: before fix-3 has been run the column is missing, and a failure
+// here must not break the page, so any error resolves to {}.
+export async function fetchProjectContacts() {
+  try {
+    const { data, error } = await supabase.from('projects').select('id, project_co, project_co_phone');
+    if (error) {
+      if (!isPhoneColumnMissing(error)) console.warn('fetchProjectContacts failed:', error.message);
+      return {};
+    }
+    const out = {};
+    for (const r of data || []) out[r.id] = { project_co: r.project_co ?? null, project_co_phone: r.project_co_phone ?? null };
+    return out;
+  } catch (err) {
+    console.warn('fetchProjectContacts failed:', err?.message);
+    return {};
+  }
+}
+
 // Single project's overview row (for the detail header). data = row | null
+// Phone is merged in from `projects` (best effort; see fetchTrackingOverview).
 export function fetchProjectTrackingRow(projectId) {
-  return trackingRead(() =>
-    supabase.from('project_tracking_overview').select('*').eq('project_id', projectId).maybeSingle()
-  );
+  return trackingRead(async () => {
+    const res = await supabase.from('project_tracking_overview').select('*').eq('project_id', projectId).maybeSingle();
+    if (res.error || !res.data) return res;
+    // undefined = "could not read it" (NOT the same as null = "really empty"). The edit form
+    // must never treat an unknown phone as empty, or an unrelated save would erase a real number.
+    // Exception: a missing column (fix-3 not run yet) means there is nothing stored to lose.
+    let phone;
+    try {
+      const p = await supabase.from('projects').select('project_co_phone').eq('id', projectId).maybeSingle();
+      if (!p.error) phone = p.data?.project_co_phone ?? null;
+      else if (isPhoneColumnMissing(p.error)) phone = null;
+    } catch {
+      /* stays undefined = unknown */
+    }
+    return { ...res, data: { ...res.data, project_co_phone: phone } };
+  });
 }
 
 // Newest first. Entries can be corrected or deleted (needs scripts/project-tracking-fix-2.sql).
@@ -728,39 +800,144 @@ export async function applyChecklistTemplate(installmentId, projectId) {
 
 // ---- project: contract period + coordinator ----
 
-// updates: { start_date, end_date, project_co }. Reuses updateProject, then
-// verifies a row actually came back: without an UPDATE policy on `projects`
-// the call "succeeds" with 0 rows, which would otherwise look like a save.
-export async function updateProjectTracking(projectId, updates = {}) {
-  const start = updates.start_date || null;
-  const end = updates.end_date || null;
-  if (start) assertDate(start, 'รูปแบบวันเริ่มสัญญาไม่ถูกต้อง');
-  if (end) assertDate(end, 'รูปแบบวันสิ้นสุดสัญญาไม่ถูกต้อง');
-  if (start && end && end < start) throw new Error('วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มสัญญา');
-  const project_co = (updates.project_co || '').trim() || null;
+const PROJECT_NOT_UPDATED_MESSAGE =
+  'บันทึกไม่สำเร็จ: ระบบไม่ได้แก้ไขข้อมูลโครงการ (ตาราง projects อาจยังไม่อนุญาตให้แก้ไข — แจ้งผู้ดูแลตรวจ policy UPDATE)';
 
-  let row;
-  try {
-    row = await updateProject(projectId, { start_date: start, end_date: end, project_co });
-  } catch (err) {
-    throw trackingWriteError(err, 'บันทึกข้อมูลโครงการไม่สำเร็จ');
-  }
-  if (!row) {
-    throw new Error(
-      'บันทึกไม่สำเร็จ: ระบบไม่ได้แก้ไขข้อมูลโครงการ (ตาราง projects อาจยังไม่อนุญาตให้แก้ไข — แจ้งผู้ดูแลตรวจ policy UPDATE)'
-    );
-  }
-  // audit trail in the existing activity log; failure here must not fail the save
+// '' / null / undefined and anything outside the list are rejected. A project whose
+// stored status is some legacy text is never sent through here unless the user picks
+// one of the allowed values.
+function assertProjectStatus(status) {
+  if (!PROJECT_STATUSES.includes(status)) throw new Error('สถานะโครงการไม่ถูกต้อง');
+}
+
+// Audit line in the activity log (anonymous, like the other tracking writes).
+// A failure here must never fail the save that already happened.
+async function logStatusChange(projectId, from, to) {
   try {
     await logActivity(
       projectId,
-      'tracking_update',
-      `แก้ไขข้อมูลติดตามงาน: Project Co=${project_co || '-'}, สัญญา ${start || '-'} ถึง ${end || '-'}`,
+      'project_status_change',
+      `เปลี่ยนสถานะโครงการ: ${from || '-'} → ${to}`,
       null,
       { anonymous: true }
     );
   } catch (err) {
-    console.warn('logActivity (tracking_update) failed:', err?.message);
+    console.warn('logActivity (project_status_change) failed:', err?.message);
+  }
+}
+
+// Change only projects.status. `previousStatus` (what the user saw) is used for the
+// audit line only. Returns the updated row; throws a Thai message on failure.
+export async function updateProjectStatus(projectId, status, { previousStatus } = {}) {
+  assertProjectStatus(status);
+  let row;
+  try {
+    row = await updateProject(projectId, { status });
+  } catch (err) {
+    throw trackingWriteError(err, 'เปลี่ยนสถานะโครงการไม่สำเร็จ');
+  }
+  // RLS filtering the UPDATE leaves 0 rows and no error: do not report that as saved
+  if (!row) throw new Error(PROJECT_NOT_UPDATED_MESSAGE);
+  await logStatusChange(projectId, previousStatus, status);
+  return row;
+}
+
+// updates: any subset of { start_date, end_date, project_co, project_co_phone, project_status },
+// plus `previous_status` (audit line only). PARTIAL by design: a key that is `undefined` /
+// absent is neither validated nor written, so a form that sends only what the user changed
+// cannot overwrite what someone else saved meanwhile. '' / null for a provided key clears it
+// (status can never be cleared). Validation covers provided fields only; the date-order check
+// reads the stored counterpart when just one of the two dates is provided (best effort: the DB
+// constraint projects_period_chk is the backstop).
+// Reuses updateProject, then verifies a row actually came back: without an UPDATE policy
+// on `projects` the call "succeeds" with 0 rows, which would otherwise look like a save.
+//
+// project_co_phone needs scripts/project-tracking-fix-3.sql. If the column is
+// missing the whole save is rejected with a Thai message (nothing is half-saved),
+// EXCEPT when the phone is being cleared: there is nothing to store or clear, so the other
+// fields are saved without it (keeps editing dates / Project Co usable before fix-3).
+// The phone number is never written to the activity log.
+export async function updateProjectTracking(projectId, updates = {}) {
+  const has = (k) => updates[k] !== undefined;
+  const payload = {};
+
+  if (has('start_date')) {
+    const v = updates.start_date || null;
+    if (v) assertDate(v, 'รูปแบบวันเริ่มสัญญาไม่ถูกต้อง');
+    payload.start_date = v;
+  }
+  if (has('end_date')) {
+    const v = updates.end_date || null;
+    if (v) assertDate(v, 'รูปแบบวันสิ้นสุดสัญญาไม่ถูกต้อง');
+    payload.end_date = v;
+  }
+  if (has('project_co')) payload.project_co = (updates.project_co || '').trim() || null;
+  if (has('project_co_phone')) {
+    const phoneMsg = phoneError(updates.project_co_phone);
+    if (phoneMsg) throw new Error(phoneMsg);
+    payload.project_co_phone = normalizePhones(updates.project_co_phone);
+  }
+  if (has('project_status')) {
+    assertProjectStatus(updates.project_status);
+    payload.status = updates.project_status;
+  }
+  if (Object.keys(payload).length === 0) throw new Error('ไม่มีข้อมูลที่ต้องบันทึก');
+
+  // date order, using the stored value for a counterpart that is not being written
+  if ('start_date' in payload || 'end_date' in payload) {
+    let s = payload.start_date;
+    let e = payload.end_date;
+    const onlyOne = !('start_date' in payload && 'end_date' in payload);
+    if (onlyOne && (s || e)) {
+      try {
+        const cur = await supabase.from('projects').select('start_date, end_date').eq('id', projectId).maybeSingle();
+        if (!cur.error && cur.data) {
+          if (!('start_date' in payload)) s = (cur.data.start_date || '').slice(0, 10) || null;
+          if (!('end_date' in payload)) e = (cur.data.end_date || '').slice(0, 10) || null;
+        }
+      } catch {
+        /* the database CHECK constraint still protects the period */
+      }
+    }
+    if (s && e && e < s) throw new Error('วันสิ้นสุดสัญญาต้องไม่ก่อนวันเริ่มสัญญา');
+  }
+
+  let row;
+  try {
+    try {
+      row = await updateProject(projectId, payload);
+    } catch (err) {
+      if (!('project_co_phone' in payload) || !isPhoneColumnMissing(err)) throw err;
+      if (payload.project_co_phone) throw new Error(PHONE_COLUMN_MISSING_MESSAGE);
+      const { project_co_phone: _omit, ...rest } = payload;
+      if (Object.keys(rest).length === 0) throw new Error(PHONE_COLUMN_MISSING_MESSAGE);
+      row = await updateProject(projectId, rest);
+    }
+  } catch (err) {
+    if (err?.message === PHONE_COLUMN_MISSING_MESSAGE) throw err;
+    throw trackingWriteError(err, 'บันทึกข้อมูลโครงการไม่สำเร็จ');
+  }
+  if (!row) throw new Error(PROJECT_NOT_UPDATED_MESSAGE);
+
+  // audit trail in the existing activity log; failure here must not fail the save
+  const parts = [];
+  if ('project_co' in payload) parts.push(`Project Co=${payload.project_co || '-'}`);
+  if ('start_date' in payload && 'end_date' in payload) {
+    parts.push(`สัญญา ${payload.start_date || '-'} ถึง ${payload.end_date || '-'}`);
+  } else {
+    if ('start_date' in payload) parts.push(`วันเริ่มสัญญา ${payload.start_date || '-'}`);
+    if ('end_date' in payload) parts.push(`วันสิ้นสุดสัญญา ${payload.end_date || '-'}`);
+  }
+  if ('project_co_phone' in payload) parts.push('แก้ไขเบอร์ติดต่อ'); // never the number itself
+  if (parts.length > 0) {
+    try {
+      await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลติดตามงาน: ${parts.join(', ')}`, null, { anonymous: true });
+    } catch (err) {
+      console.warn('logActivity (tracking_update) failed:', err?.message);
+    }
+  }
+  if ('status' in payload && payload.status !== updates.previous_status) {
+    await logStatusChange(projectId, updates.previous_status, payload.status);
   }
   return row;
 }
