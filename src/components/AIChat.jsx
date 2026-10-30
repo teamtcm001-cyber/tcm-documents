@@ -7,12 +7,32 @@ import { searchFiles } from '../utils/aiSearch.js'
 import PreviewModal from './PreviewModal.jsx'
 
 // Call backend /api/chat for real Claude AI (if configured)
+// The server only needs identifying metadata. Extracted document text (content_text,
+// up to 50k chars per file) must NOT be sent: with ~200 files it pushed the request
+// past Vercel's 4.5 MB body limit, the call failed with a 413 and the chat silently
+// fell back to local search.
+function slimContext(ctx) {
+  return {
+    projects: (ctx.projects || []).map((p) => ({ id: p.id, code: p.code, name: p.name })),
+    files: (ctx.files || []).map((f) => ({
+      id: f.id,
+      projectId: f.projectId,
+      name: f.name,
+      type: f.type,
+      size: f.size,
+      date: f.date,
+      uploader: f.uploader,
+      isLatest: f.isLatest,
+    })),
+  }
+}
+
 async function callClaudeAPI(query, ctx, history) {
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, context: ctx, history }),
+      body: JSON.stringify({ query, context: slimContext(ctx), history }),
     })
     if (!response.ok) throw new Error('API not OK')
     const data = await response.json()

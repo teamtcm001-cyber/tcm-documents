@@ -5,6 +5,26 @@
 // Body: { query, context }
 // Returns: { intent, reply, files, projectCode }
 
+function pickFilesForPrompt(files, projects, query, max) {
+  if (files.length <= max) return files
+  const projById = {}
+  projects.forEach((p) => (projById[p.id] = p))
+  const tokens = String(query || '')
+    .toLowerCase()
+    .split(/[\s,.;:()[\]{}"'“”/\|_-]+/)
+    .filter((t) => t.length >= 2)
+  const score = (f) => {
+    const p = projById[f.projectId]
+    const hay = `${f.name} ${f.type} ${p?.code || ''} ${p?.name || ''}`.toLowerCase()
+    return tokens.reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0)
+  }
+  return files
+    .map((f) => ({ f, s: score(f) }))
+    .sort((a, b) => b.s - a.s || (b.f.isLatest ? 1 : 0) - (a.f.isLatest ? 1 : 0) || String(b.f.date).localeCompare(String(a.f.date)))
+    .slice(0, max)
+    .map((x) => x.f)
+}
+
 export default async function handler(req, res) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -39,14 +59,12 @@ export default async function handler(req, res) {
       .map((p) => `- ${p.code}: ${p.name} (${files.filter((f) => f.projectId === p.id).length} ไฟล์)`)
       .join('\n')
 
-    const latestFiles = files
-      .filter((f) => f.isLatest)
-      .slice(0, 50) // limit context
-      .map((f) => {
-        const p = projects.find((x) => x.id === f.projectId)
-        return `  · [${f.type}] ${f.name} — โครงการ ${p?.code || '?'} (${f.date}, ${f.size}KB)`
-      })
-      .join('\n')
+    // Keep the prompt bounded as the library grows: at most MAX_FILES_IN_PROMPT
+    // files, chosen by how many query words match name/type/project, then
+    // latest-version first, then newest. (Small libraries are sent whole.)
+    const MAX_FILES_IN_PROMPT = 300
+    const latestCount = files.filter((f) => f.isLatest).length
+    const promptFiles = pickFilesForPrompt(files, projects, query, MAX_FILES_IN_PROMPT)
 
     const systemPrompt = `คุณคือ AI Document Agent สำหรับระบบจัดการเอกสารก่อสร้าง TCM
 ตอบเป็นภาษาไทย กระชับ มืออาชีพ เหมาะกับวิศวกร/ผู้จัดการโครงการ
@@ -56,8 +74,7 @@ export default async function handler(req, res) {
 โครงการ (${projects.length} โครงการ):
 ${projLines || '- ยังไม่มีโครงการ'}
 
-ไฟล์ Version ล่าสุด (${files.filter((f) => f.isLatest).length} ไฟล์):
-${latestFiles || '- ยังไม่มีไฟล์'}
+ไฟล์ทั้งหมดในระบบ ${files.length} ไฟล์ (Version ล่าสุด ${latestCount} ไฟล์)${promptFiles.length < files.length ? ` — รายการด้านล่างคัดมา ${promptFiles.length} ไฟล์ที่เกี่ยวข้องกับคำถามที่สุด` : ''}
 
 ตอบเป็น JSON อย่างเดียว (ห้ามมี markdown code block) รูปแบบ:
 {
@@ -91,8 +108,7 @@ ${latestFiles || '- ยังไม่มีไฟล์'}
 5. ย้ำเสมอว่านี่คือคำแนะนำเบื้องต้น ไม่ใช่คำปรึกษาทางกฎหมายอย่างเป็นทางการ ควรตรวจสอบกับผู้ประกอบวิชาชีพหรือสำนักงานเขต/อปท. อีกครั้งก่อนยื่นจริง`
 
     // Add file ID to context for AI reference
-    const filesWithIds = files
-      .slice(0, 100) // limit
+    const filesWithIds = promptFiles
       .map((f) => `id=${f.id} | ${f.name} | type=${f.type} | size=${f.size}KB | date=${f.date} | uploader=${f.uploader || '?'} | isLatest=${f.isLatest}`)
       .join('\n')
 
