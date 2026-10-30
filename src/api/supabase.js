@@ -91,6 +91,41 @@ export async function createProject(projectData) {
   return retry.data?.[0] ? { ...retry.data[0], _phoneNotSaved: true } : retry.data?.[0];
 }
 
+// ---- AI chat context: projects + file METADATA in two queries (no per-project loop,
+// no extracted text). Extracted text is loaded separately and only used by the
+// local content search; it is never sent to the server.
+const CHAT_FILE_COLS =
+  'id, project_id, type, name, base_name, rev, size, ext, is_latest, storage_path, uploader_name, created_at';
+
+export async function fetchChatIndex() {
+  const [pr, fr] = await Promise.all([
+    supabase.from('projects').select('*').order('created_at', { ascending: false }),
+    supabase.from('files').select(CHAT_FILE_COLS).order('created_at', { ascending: false }).range(0, 4999),
+  ]);
+  if (pr.error) throw pr.error;
+  if (fr.error) throw fr.error;
+  return { projects: pr.data || [], files: fr.data || [] };
+}
+
+// { [fileId]: extracted text } for files that have any. Never throws (the column
+// may not exist on old databases): returns what it managed to read.
+export async function fetchFileContents() {
+  const out = {};
+  const PAGE = 50;
+  for (let from = 0; from < 5000; from += PAGE) {
+    const { data, error } = await supabase
+      .from('files')
+      .select('id, content_text')
+      .not('content_text', 'is', null)
+      .order('created_at', { ascending: false })
+      .range(from, from + PAGE - 1);
+    if (error) return out;
+    for (const r of data || []) out[r.id] = r.content_text;
+    if (!data || data.length < PAGE) break;
+  }
+  return out;
+}
+
 export async function updateProject(projectId, updates) {
   const { data, error } = await supabase
     .from('projects')

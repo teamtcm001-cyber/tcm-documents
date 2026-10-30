@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import { fmtDate, fmtSize, TYPE_LABEL, normalizeFile, computeIsLatest } from '../utils/format.js'
-import { fetchProjects, fetchFiles, downloadFile } from '../api/supabase.js'
+import { fetchChatIndex, fetchFileContents, downloadFile } from '../api/supabase.js'
 import { searchFiles } from '../utils/aiSearch.js'
 import PreviewModal from './PreviewModal.jsx'
 
@@ -55,6 +55,8 @@ export default function AIChat({ open, onClose }) {
   const [input, setInput] = useState('')
   const [thinking, setThinking] = useState(false)
   const [ctx, setCtx] = useState({ projects: [], files: [] })
+  const [ctxReady, setCtxReady] = useState(false)
+  const ctxTask = useRef(null)
   const [aiMode, setAiMode] = useState('local') // 'local' or 'claude'
   const [previewFile, setPreviewFile] = useState(null)
   const endRef = useRef(null)
@@ -69,19 +71,33 @@ export default function AIChat({ open, onClose }) {
     endRef.current?.scrollTo(0, 99999)
   }, [msgs, thinking])
 
-  const loadContext = async () => {
-    try {
-      const projects = await fetchProjects()
-      const allFiles = []
-      for (const p of projects) {
-        const rows = await fetchFiles(p.id)
-        rows.forEach((r) => allFiles.push(normalizeFile(r)))
-      }
+  // Context loads in two steps: fast metadata (needed before the first question is
+  // answered) and extracted text in the background (only the local content search
+  // uses it). send() waits for step 1 — asking before it finished used to give the
+  // AI an empty library and a confident "no projects / no files" answer.
+  const loadContext = () => {
+    const task = (async () => {
+      const { projects, files } = await fetchChatIndex()
+      const allFiles = files.map((r) => normalizeFile(r))
       computeIsLatest(allFiles)
       setCtx({ projects, files: allFiles })
-    } catch (err) {
+      setCtxReady(true)
+      fetchFileContents()
+        .then((contents) =>
+          setCtx((prev) => ({
+            ...prev,
+            files: prev.files.map((f) => (contents[f.id] ? { ...f, contentText: contents[f.id] } : f)),
+          }))
+        )
+        .catch(() => {})
+      return { projects, files: allFiles }
+    })()
+    ctxTask.current = task
+    task.catch((err) => {
       console.error('load ctx:', err)
-    }
+      setCtxReady(false)
+    })
+    return task
   }
 
   const suggestions = [
@@ -101,12 +117,27 @@ export default function AIChat({ open, onClose }) {
     // Try Claude API first (if configured) — send recent turns so multi-step
     // conversations (e.g. the permit document checklist) keep context
     const history = msgs.slice(-12).map((m) => ({ role: m.role, text: m.text }))
-    let result = await callClaudeAPI(text, ctx, history)
+    let liveCtx = ctx
+    if (!ctxReady) {
+      try {
+        // (re)start loading if it never ran or failed, then wait for the metadata
+        const loaded = await Promise.race([
+          (ctxTask.current || loadContext()).catch(() => loadContext()),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000)),
+        ])
+        liveCtx = loaded
+      } catch (err) {
+        setThinking(false)
+        setMsgs((m) => [...m, { role: 'bot', text: 'โหลดข้อมูลโครงการไม่สำเร็จ ลองใหม่อีกครั้งในอีกสักครู่ครับ' }])
+        return
+      }
+    }
+    let result = await callClaudeAPI(text, liveCtx, history)
     let usedAI = 'local'
 
     if (!result) {
       // Fallback to local rule-based search
-      result = searchFiles(text, ctx)
+      result = searchFiles(text, liveCtx)
     } else {
       usedAI = 'claude'
     }
