@@ -1,6 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { uploadToDrive, driveFileUrl } from '../utils/googleDrive.js';
-import { getLocalName } from '../utils/localIdentity.js';
+import { uploadToDrive, discardDriveUpload, clearDriveTokenCache } from '../utils/googleDrive.js';
 import {
   todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, ALL_STATUSES, CLEARS_BILLED_DATE,
   phoneError, normalizePhones, PROJECT_STATUSES,
@@ -13,33 +12,406 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn('⚠️ Missing Supabase credentials. Check .env file');
 }
 
-export const supabase = createClient(supabaseUrl || '', supabaseAnonKey || '');
+export const supabase = createClient(supabaseUrl || '', supabaseAnonKey || '', {
+  // Sessions live in localStorage and refresh themselves. No magic links / OAuth are used,
+  // so the URL is never inspected for a session.
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+});
 
 // ============ AUTH ============
-// No login UI — App.jsx signs every visitor into one shared account on load
-// so RLS (which requires an authenticated session) keeps working.
+// Real per-person login (email + password). Accounts are created by an admin
+// (POST /api/admin-users); there is no self sign-up and no e-mail based recovery:
+// an admin resets the password. The database decides what a signed-in person may
+// see/do (RLS, scripts/auth-01-foundation.sql + auth-02-enforce-rls.sql); the UI only
+// mirrors that for clarity.
+
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_BYTES = 72; // bcrypt limit used by Supabase Auth
+
+// Error with a Thai, user-safe message. `code` is a stable machine value.
+export class AppError extends Error {
+  constructor(message, code, extra) {
+    super(message);
+    this.name = 'AppError';
+    this.code = code || 'error';
+    if (extra) Object.assign(this, extra);
+  }
+}
+
+const isNetworkError = (error) =>
+  !error ||
+  error.name === 'AuthRetryableFetchError' ||
+  error.status === 0 ||
+  /failed to fetch|networkerror|load failed|network request failed/i.test(error.message || '');
+
+function describeAuthError(error, fallback) {
+  const code = String(error?.code || '');
+  const msg = String(error?.message || '');
+  if (code === 'user_banned' || /banned/i.test(msg)) {
+    return new AppError('บัญชีนี้ถูกปิดการใช้งาน กรุณาติดต่อผู้ดูแลระบบ', 'account_disabled');
+  }
+  if (code === 'invalid_credentials' || /invalid login credentials/i.test(msg)) {
+    return new AppError('อีเมลหรือรหัสผ่านไม่ถูกต้อง', 'invalid_credentials');
+  }
+  if (code === 'email_not_confirmed') {
+    return new AppError('บัญชียังไม่พร้อมใช้งาน กรุณาติดต่อผู้ดูแลระบบ', 'account_disabled');
+  }
+  if (code === 'over_request_rate_limit' || error?.status === 429) {
+    return new AppError('พยายามเข้าสู่ระบบบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่', 'rate_limited');
+  }
+  // same_password must be tested first: its message ("New password should be different ...") also starts with "password should"
+  if (code === 'same_password' || /different from the old password/i.test(msg)) {
+    return new AppError('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านเดิม', 'same_password');
+  }
+  if (code === 'weak_password' || /password should (be at least|contain)|weak/i.test(msg)) {
+    return new AppError(`รหัสผ่านไม่ปลอดภัยพอ — ใช้อย่างน้อย ${MIN_PASSWORD_LENGTH} ตัวอักษร ผสมตัวอักษรและตัวเลข`, 'weak_password');
+  }
+  if (code === 'reauthentication_needed' || /reauthenticat/i.test(msg)) {
+    return new AppError('เพื่อความปลอดภัย กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่ก่อนเปลี่ยนรหัสผ่าน', 'reauthentication_needed');
+  }
+  if (isNetworkError(error)) {
+    return new AppError('เชื่อมต่อระบบไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่', 'network');
+  }
+  return new AppError(fallback || 'เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง', 'error');
+}
+
 export async function signIn(email, password) {
   const { data, error } = await supabase.auth.signInWithPassword({
-    email,
-    password
+    email: String(email || '').trim(),
+    password: String(password || ''),
   });
-  if (error) throw error;
+  if (error) throw describeAuthError(error, 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
+  clearDriveTokenCache();
   return data;
 }
 
-export async function getCurrentUser() {
-  const { data: { user }, error } = await supabase.auth.getUser();
-  if (error) throw error;
-  return user;
+// 'local' = end THIS browser's session only (the default would sign the person out everywhere).
+export async function signOut() {
+  clearDriveTokenCache();
+  try {
+    await supabase.auth.signOut({ scope: 'local' });
+  } catch (err) {
+    console.warn('signOut failed:', err?.message);
+  }
 }
 
-// Records that someone with this display name opened the app — since every
-// visitor shares one Supabase account, this is the only backend record of
-// who's actually using the app (until they upload/edit something).
-export async function logVisit(displayName) {
-  const { error } = await supabase.from('app_visits').insert([{ display_name: displayName }]);
-  if (error) console.error('logVisit failed:', error.message);
+export async function getSession() {
+  const { data, error } = await supabase.auth.getSession();
+  if (error) throw describeAuthError(error);
+  return data?.session || null;
 }
+
+// cb(event, session). Returns an unsubscribe function.
+export function onAuthStateChange(cb) {
+  const { data } = supabase.auth.onAuthStateChange((event, session) => cb(event, session));
+  return () => data?.subscription?.unsubscribe();
+}
+
+export async function getCurrentUser() {
+  const session = await getSession();
+  if (!session?.user) throw new AppError('กรุณาเข้าสู่ระบบ', 'unauthorized');
+  return session.user;
+}
+
+// The caller's ACTIVE profile { id, email, full_name, role, active, must_change_password }
+// or null when there is none (deactivated person / no profile). Network or server
+// failures THROW, so "disabled" is never confused with "could not check".
+export async function fetchMyProfile() {
+  const { data, error } = await supabase.rpc('my_profile');
+  if (error) {
+    if (error.status === 401 || /jwt/i.test(error.message || '')) throw new AppError('เซสชันหมดอายุ', 'unauthorized');
+    throw describeAuthError(error, 'โหลดข้อมูลบัญชีไม่สำเร็จ');
+  }
+  // composite-returning function: SQL NULL arrives as null or as an all-null object
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || !row.id || row.active === false) return null;
+  return {
+    id: row.id,
+    email: row.email || '',
+    full_name: row.full_name || '',
+    role: row.role,
+    active: true,
+    must_change_password: row.must_change_password === true,
+  };
+}
+
+export function validateNewPassword(pw, confirm, { email } = {}) {
+  if (!pw) return 'กรุณากรอกรหัสผ่านใหม่';
+  if (pw.length < MIN_PASSWORD_LENGTH) return `รหัสผ่านต้องยาวอย่างน้อย ${MIN_PASSWORD_LENGTH} ตัวอักษร`;
+  if (new TextEncoder().encode(pw).length > MAX_PASSWORD_BYTES) return `รหัสผ่านยาวเกินไป (ไม่เกิน ${MAX_PASSWORD_BYTES} ไบต์)`;
+  if (/^\s|\s$/.test(pw)) return 'รหัสผ่านต้องไม่ขึ้นต้นหรือลงท้ายด้วยช่องว่าง';
+  if (email && pw.toLowerCase() === String(email).toLowerCase()) return 'รหัสผ่านต้องไม่เหมือนอีเมล';
+  if (confirm !== undefined && pw !== confirm) return 'รหัสผ่านทั้งสองช่องไม่ตรงกัน';
+  return '';
+}
+
+// Step 1 of a password change (Supabase Auth). Step 2 is clearMustChangePassword().
+export async function updatePassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw describeAuthError(error, 'เปลี่ยนรหัสผ่านไม่สำเร็จ');
+}
+
+// Clears profiles.must_change_password for the caller (SECURITY DEFINER function, own row only).
+export async function clearMustChangePassword() {
+  const { error } = await supabase.rpc('clear_must_change_password');
+  if (error) {
+    // The function RAISES P0001 'PASSWORD_NOT_CHANGED: ...' when Auth's password was not really changed since
+    // the reset, and 28000 'NOT_SIGNED_IN' without a valid JWT.
+    if (String(error.code || '') === 'P0001' || /PASSWORD_NOT_CHANGED/.test(error.message || '')) {
+      throw new AppError('รหัสผ่านยังไม่ถูกเปลี่ยน', 'password_not_changed');
+    }
+    if (String(error.code || '') === '28000' || /NOT_SIGNED_IN/.test(error.message || '') || error.status === 401) {
+      throw new AppError('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่', 'unauthorized');
+    }
+    throw describeAuthError(error, 'บันทึกสถานะการเปลี่ยนรหัสผ่านไม่สำเร็จ');
+  }
+}
+
+// ---- authenticated calls to our own serverless functions ----
+// Problems that need the whole app to react. Listeners get one of:
+//   'expired'    the session is over                        -> login screen
+//   'disabled'   403 account_disabled                       -> blocked screen
+//   'mustChange' 403 password_change_required               -> re-read the profile (forced change-password screen)
+//   'denied'     a write was refused by RLS / matched 0 rows -> re-read memberships so stale edit controls go away
+// A transient 503 auth_unavailable is NOT one of them: it never ends the session (see UNAVAILABLE_MESSAGE).
+const authProblemListeners = new Set();
+export function subscribeAuthProblem(cb) {
+  authProblemListeners.add(cb);
+  return () => authProblemListeners.delete(cb);
+}
+function reportAuthProblem(kind) {
+  if (kind === 'expired' || kind === 'denied') clearDriveTokenCache();
+  authProblemListeners.forEach((cb) => {
+    try {
+      cb(kind);
+    } catch {
+      /* a listener must never break the request */
+    }
+  });
+}
+
+export const UNAVAILABLE_MESSAGE = 'ระบบตรวจสอบสิทธิ์ไม่ตอบสนอง ลองใหม่อีกครั้ง';
+export const PASSWORD_CHANGE_REQUIRED_MESSAGE = 'ต้องตั้งรหัสผ่านใหม่ของคุณเองก่อน จึงจะใช้งานส่วนนี้ได้';
+export const RATE_LIMITED_MESSAGE = 'ส่งคำขอบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่';
+export const SESSION_EXPIRED_MESSAGE = 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่';
+// Shown when a write was refused (RLS) or matched no row.
+export const NO_ACCESS_MESSAGE = 'ไม่มีสิทธิ์ดำเนินการ หรือข้อมูลถูกเปลี่ยนไปแล้ว — กรุณารีเฟรช';
+
+const unavailableError = () => new AppError(UNAVAILABLE_MESSAGE, 'auth_unavailable');
+
+// network trouble or a 5xx from the auth server: the session itself may still be fine
+const isTransientAuthError = (error) =>
+  isNetworkError(error) || (typeof error?.status === 'number' && error.status >= 500);
+
+// -> { token } | { token: null, transient: true } (auth server unreachable: keep the session) | { token: null }
+async function getAccessToken({ forceRefresh = false } = {}) {
+  if (forceRefresh) {
+    const { data, error } = await supabase.auth.refreshSession();
+    if (error) return isTransientAuthError(error) ? { token: null, transient: true } : { token: null };
+    return { token: data?.session?.access_token || null };
+  }
+  const { data, error } = await supabase.auth.getSession(); // refreshes an expired token itself
+  const session = data?.session;
+  if (!session) return error && isTransientAuthError(error) ? { token: null, transient: true } : { token: null };
+  // refresh a little early so a request does not race the expiry
+  if (session.expires_at && session.expires_at - Date.now() / 1000 < 30) {
+    const { data: r, error: rErr } = await supabase.auth.refreshSession();
+    if (rErr) return isTransientAuthError(rErr) ? { token: session.access_token } : { token: null };
+    return { token: r?.session?.access_token || session.access_token };
+  }
+  return { token: session.access_token };
+}
+
+// fetch() + "Authorization: Bearer <access token>". Returns the Response untouched so each caller keeps
+// its own handling, but:
+//   * 401 -> refresh the token once and retry; still 401 -> the session is over (reported as 'expired')
+//     and the response is returned;
+//   * 403 { error: 'account_disabled' } -> reported as 'disabled';
+//   * 403 { error: 'password_change_required' } -> reported as 'mustChange' (forced password screen);
+//   * 503 (auth_unavailable) -> returned as is and the session is KEPT; use apiErrorMessage() for the text.
+// If the auth server cannot be reached while refreshing, throws AppError(code 'auth_unavailable') instead of
+// treating the session as expired. Never logs tokens.
+export async function authFetch(url, init = {}) {
+  const send = (token) => {
+    const headers = new Headers(init.headers || {});
+    headers.set('Authorization', `Bearer ${token}`);
+    return fetch(url, { ...init, headers });
+  };
+
+  let { token, transient } = await getAccessToken();
+  if (!token) {
+    if (transient) throw unavailableError();
+    reportAuthProblem('expired');
+    throw new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+  }
+  let res = await send(token);
+  if (res.status === 401) {
+    ({ token, transient } = await getAccessToken({ forceRefresh: true }));
+    if (!token && transient) throw unavailableError();
+    if (token) res = await send(token);
+    if (!token || res.status === 401) {
+      reportAuthProblem('expired');
+      return res;
+    }
+  }
+  if (res.status === 403) {
+    const body = await res.clone().json().catch(() => null);
+    if (body?.error === 'account_disabled') reportAuthProblem('disabled');
+    else if (body?.error === 'password_change_required') reportAuthProblem('mustChange');
+  }
+  return res;
+}
+
+// Reads { error, message } from one of our API error responses.
+async function readApiError(res) {
+  const body = await res.json().catch(() => null);
+  return { code: body?.error || `http_${res.status}`, message: typeof body?.message === 'string' ? body.message : '', body };
+}
+
+// Thai message for a failed /api/* response. Codes with a fixed client wording win over the server's own
+// text; for the rest the server's Thai message is used, then `fallback`.
+export function apiErrorMessage(status, code, serverMessage, fallback) {
+  switch (code) {
+    case 'auth_unavailable': return UNAVAILABLE_MESSAGE;
+    case 'password_change_required': return PASSWORD_CHANGE_REQUIRED_MESSAGE;
+    case 'rate_limited': return RATE_LIMITED_MESSAGE;
+    case 'cannot_remove_last_admin':
+    case 'last_admin': // old name, kept for safety
+      return 'ต้องมีผู้ดูแลระบบที่ใช้งานได้อย่างน้อย 1 คน';
+    case 'pw_marker_failed': return serverMessage || 'ดำเนินการไม่สมบูรณ์ — กรุณาลองอีกครั้ง';
+    case 'audit_unavailable': return serverMessage || 'ระบบบันทึกประวัติไม่พร้อมใช้งาน ยังไม่ได้ดำเนินการ — กรุณาลองอีกครั้ง';
+    default: break;
+  }
+  if (status === 503) return UNAVAILABLE_MESSAGE;
+  if (status === 429) return RATE_LIMITED_MESSAGE;
+  return serverMessage || fallback;
+}
+
+// ---- writes: map database errors to Thai, tell the app when access / session is stale ----
+// RLS refusing a write is either a 42501 error or "0 rows affected" (UPDATE/DELETE silently filtered).
+// Both mean the person's idea of what they may do is out of date -> 'denied' (AuthContext re-reads memberships).
+const isJwtError = (error) => String(error?.code || '') === 'PGRST301' || /\bJWT\b/.test(error?.message || '');
+const isRlsError = (error) =>
+  String(error?.code || '') === '42501' || /row-level security|permission denied/i.test(error?.message || '');
+
+// What to throw for a failed write: AppError for session / permission problems, else the error itself.
+function writeError(error) {
+  if (isJwtError(error)) {
+    reportAuthProblem('expired');
+    return new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+  }
+  if (isRlsError(error)) {
+    reportAuthProblem('denied');
+    return new AppError(NO_ACCESS_MESSAGE, 'no_access');
+  }
+  return error;
+}
+// An UPDATE/DELETE that RLS filters out succeeds with 0 rows: surface that. Returns the affected rows.
+function requireAffected(data) {
+  if (!data || data.length === 0) {
+    reportAuthProblem('denied');
+    throw new AppError(NO_ACCESS_MESSAGE, 'no_access');
+  }
+  return data;
+}
+
+// ---- project membership (who may see / edit which project) ----
+// { [project_id]: 'editor' | 'viewer' } for the signed-in person (own rows; RLS pm_select_own).
+// userId is required because an exec (and an admin) can read other people's rows too.
+export async function fetchMyMemberships(userId) {
+  const { data, error } = await supabase.from('project_members').select('project_id, role').eq('user_id', userId);
+  if (error) throw error;
+  const out = {};
+  for (const r of data || []) out[r.project_id] = r.role;
+  return out;
+}
+
+// ---- admin console data (admin only; RLS + /api/admin-users enforce it) ----
+export async function fetchAllProjectsForAdmin() {
+  const { data, error } = await supabase
+    .from('projects')
+    .select('id, code, name, status, color')
+    .order('name', { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+// rows of project_members for one user: [{ project_id, role }]
+export async function fetchMemberships(userId) {
+  const { data, error } = await supabase.from('project_members').select('project_id, role').eq('user_id', userId);
+  if (error) throw error;
+  return data || [];
+}
+
+// role: 'editor' | 'viewer' | null/'none' (= remove access). One row per (project, user).
+export async function setMembership(projectId, userId, role) {
+  if (!role || role === 'none') {
+    const { error } = await supabase.from('project_members').delete().eq('project_id', projectId).eq('user_id', userId);
+    if (error) throw error;
+    return null;
+  }
+  if (!['editor', 'viewer'].includes(role)) throw new AppError('สิทธิ์ไม่ถูกต้อง', 'bad_request');
+  const { data, error } = await supabase
+    .from('project_members')
+    .upsert([{ project_id: projectId, user_id: userId, role }], { onConflict: 'project_id,user_id' })
+    .select();
+  if (error) throw error;
+  if (!data || data.length === 0) throw new AppError('บันทึกสิทธิ์ไม่สำเร็จ (ไม่มีสิทธิ์ดำเนินการ)', 'forbidden');
+  return role;
+}
+
+// POST /api/admin-users { action, ...payload } -> parsed JSON ({ ok: true, ... }).
+// Throws AppError with the server's Thai message and its error code
+// (cannot_modify_self, cannot_remove_last_admin, email_exists, invalid_email, forbidden, ...).
+async function adminCall(action, payload = {}) {
+  let res;
+  try {
+    res = await authFetch('/api/admin-users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...payload }),
+    });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    throw new AppError('เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่อีกครั้ง', 'network');
+  }
+  if (!res.ok) {
+    const { code, message, body: errBody } = await readApiError(res);
+    if (res.status === 401) throw new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized', { status: 401 });
+    const fallback =
+      res.status === 403 ? 'ไม่มีสิทธิ์ดำเนินการนี้'
+        : res.status === 404 ? 'ไม่พบข้อมูล'
+          : res.status >= 500 ? 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง'
+            : 'ดำเนินการไม่สำเร็จ';
+    throw new AppError(apiErrorMessage(res.status, code, message, fallback), code, {
+      status: res.status,
+      // 409 orphan_auth_user: when the existing sign-in account was last used (ISO string | null)
+      ...(code === 'orphan_auth_user' ? { lastSignInAt: errBody?.lastSignInAt ?? null, serverMessage: message } : {}),
+    });
+  }
+  const body = await res.json().catch(() => null);
+  if (!body || body.ok !== true) throw new AppError('ระบบตอบกลับไม่ถูกต้อง', 'bad_response');
+  return body;
+}
+
+export const adminListUsers = async () => (await adminCall('list')).users || [];
+// -> { user, temporaryPassword }  (the password is shown ONCE; never store it)
+// A success without a usable temporary password is treated as a failure: the dialog must never show a
+// stale / empty password. (Failures such as pw_marker_failed never carry one.)
+const withPassword = (body) => {
+  if (typeof body.temporaryPassword !== 'string' || body.temporaryPassword.length < 8) {
+    throw new AppError('ระบบไม่ได้ส่งรหัสผ่านชั่วคราวกลับมา — กรุณาลองอีกครั้ง', 'bad_response');
+  }
+  return body;
+};
+// adoptExisting:true = the admin confirmed taking over an orphan sign-in account (see 409 orphan_auth_user)
+export const adminCreateUser = async ({ email, fullName, role, adoptExisting = false }) =>
+  withPassword(await adminCall('create', { email, full_name: fullName, role, ...(adoptExisting ? { adoptExisting: true } : {}) }));
+// -> { user, temporaryPassword, sessionsRevoked, audit? }
+export const adminResetPassword = async (userId) => withPassword(await adminCall('resetPassword', { userId }));
+export const adminSetRole = (userId, role) => adminCall('setRole', { userId, role });
+export const adminSetActive = (userId, active) => adminCall('setActive', { userId, active });
+export const adminUpdateProfile = (userId, fullName) => adminCall('updateProfile', { userId, full_name: fullName });
 
 // ============ PROJECTS ============
 export async function fetchProjects() {
@@ -135,17 +507,19 @@ export async function updateProject(projectId, updates) {
     .from('projects')
     .update(updates)
     .eq('id', projectId)
-    .select();
-  if (error) throw error;
-  return data?.[0];
+    .select(); // full row: callers use it; also proves at least one row was affected
+  if (error) throw writeError(error);
+  return requireAffected(data)[0];
 }
 
 export async function deleteProject(projectId) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('projects')
     .delete()
-    .eq('id', projectId);
-  if (error) throw error;
+    .eq('id', projectId)
+    .select('id');
+  if (error) throw writeError(error);
+  requireAffected(data);
 }
 
 // ============ FILES ============
@@ -183,8 +557,16 @@ export async function uploadFile(projectId, file, fileType, uploaderName = null,
   const user = await getCurrentUser();
   contentText = sanitizePgText(contentText);
 
-  // 1. Upload to Google Drive — storage_path stores the Drive file id
-  const driveFileId = await uploadToDrive(file);
+  // 1. Upload to Google Drive — storage_path stores the Drive file id.
+  // /api/drive-token is per project (role gate for THAT project); a refusal means our idea of the
+  // person's access is stale, so the app re-reads memberships.
+  let driveFileId;
+  try {
+    driveFileId = await uploadToDrive(file, authFetch, projectId);
+  } catch (err) {
+    if (err?.code === 'forbidden') reportAuthProblem('denied');
+    throw err;
+  }
 
   // 2. Insert file record (with optional content_text for search)
   const baseName = file.name.replace(/\.\w+$/, '').replace(/_(rev\s*\d+|v\d+|\d{4}-\d{2}-\d{2})$/i, '');
@@ -206,84 +588,230 @@ export async function uploadFile(projectId, file, fileType, uploaderName = null,
     insertData.content_text = contentText;
   }
 
-  const { data: fileData, error: fileError } = await supabase
-    .from('files')
-    .insert([insertData])
-    .select();
-
-  if (fileError) {
+  let inserted = await insertFileRow(insertData);
+  if (inserted.error && contentText && /content_text/i.test(inserted.error.message || '')) {
     // If content_text column doesn't exist yet, retry without it
-    if (contentText && /content_text/i.test(fileError.message || '')) {
-      delete insertData.content_text;
-      const retry = await supabase.from('files').insert([insertData]).select();
-      if (retry.error) throw retry.error;
-      return retry.data?.[0];
+    delete insertData.content_text;
+    inserted = await insertFileRow(insertData);
+  }
+  let row = inserted.data?.[0];
+
+  if (inserted.error) {
+    // The file is already on Drive. What happens to it depends on what we KNOW about the insert:
+    //  * 23505 (storage_path unique): a row already owns this Drive id -> never delete, friendly message;
+    //  * unknown outcome (network / timeout / 5xx): the INSERT may have committed -> never delete; look the row up
+    //    by storage_path: found = success, not found = tell the person to check before uploading again;
+    //  * definite rejection (4xx: RLS / permission, check or not-null violation, JWT): nothing was stored ->
+    //    delete the Drive object, but only after re-selecting by storage_path proves no row points at it;
+    //  * anything else: keep the object (never guess).
+    const err = inserted.error;
+    if (String(err.code || '') === '23505') {
+      throw new AppError('ไฟล์นี้ถูกบันทึกในระบบแล้ว', 'already_saved');
     }
-    throw fileError;
+    if (isUnknownOutcome(inserted)) {
+      const found = await findRowByStoragePath(driveFileId);
+      if (found.row) {
+        row = found.row;
+      } else {
+        throw new AppError('ไม่แน่ใจว่าบันทึกสำเร็จ — ตรวจสอบรายการเอกสารก่อนอัปโหลดซ้ำ', 'unsure_outcome');
+      }
+    } else {
+      if (isDefiniteRejection(inserted)) {
+        const found = await findRowByStoragePath(driveFileId);
+        if (!found.error && !found.row) await discardDriveUpload(projectId, driveFileId);
+      }
+      throw writeError(err);
+    }
+  }
+  if (!row) {
+    // insert reported success but returned nothing: it may still exist (e.g. not readable back) -> never delete
+    const found = await findRowByStoragePath(driveFileId);
+    if (!found.row) {
+      reportAuthProblem('denied');
+      throw new AppError(NO_ACCESS_MESSAGE, 'no_access');
+    }
+    row = found.row;
   }
 
-  // 3. Mark old versions as not latest
-  await supabase
-    .from('files')
-    .update({ is_latest: false })
-    .eq('base_name', baseName)
-    .eq('project_id', projectId)
-    .neq('id', fileData[0].id);
+  // 3. Mark old versions as not latest, then make sure exactly one row of the family is. The file IS saved at this
+  // point, so a failure here is only a warning (row._warning) - the caller shows it without failing the upload.
+  try {
+    await settleLatest(projectId, fileType, baseName, row);
+  } catch (err) {
+    return {
+      ...row,
+      _warning: err instanceof AppError && err.code === 'latest_unsettled'
+        ? err.message
+        : 'อัปโหลดแล้ว แต่ตั้งสถานะ "เวอร์ชันล่าสุด" ไม่สำเร็จ — กรุณารีเฟรชหน้า',
+    };
+  }
+  return row;
+}
 
-  return fileData?.[0];
+// supabase-js reports a lost connection / timeout as { error, status: 0 }, never as an exception.
+const insertFileRow = async (fields) => {
+  try {
+    return await supabase.from('files').insert([fields]).select();
+  } catch (e) {
+    return { data: null, status: 0, error: { message: String(e?.message || e), code: '' } };
+  }
+};
+// the request may or may not have been executed
+const isUnknownOutcome = (res) => !!res.error && (!res.status || res.status >= 500);
+// PostgREST answered 4xx with a reason that proves nothing was stored
+const isDefiniteRejection = (res) => {
+  const e = res.error;
+  if (!e || !(res.status >= 400 && res.status < 500)) return false;
+  return isRlsError(e) || isJwtError(e) || ['23514', '23502'].includes(String(e.code || ''));
+};
+// -> { row } (a files row that references this Drive id | null) or { error } when the lookup itself failed
+async function findRowByStoragePath(driveId) {
+  try {
+    const { data, error } = await supabase.from('files').select('*').eq('storage_path', driveId).limit(1);
+    if (error) return { error };
+    return { row: data?.[0] || null };
+  } catch (error) {
+    return { error };
+  }
+}
+
+// Newest first: created_at, then id as the tie-break (every client computes the same winner).
+const newestFirst = (a, b) =>
+  (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+
+// A version family is (project_id, type, base_name). Two editors uploading versions at the same moment
+// can each flip the other's row and leave NO latest row, so after the normal flip the family is re-read
+// and exactly one is_latest (the newest) is enforced, fixing up with further updates (max 3 rounds, then
+// one last verification read). A fix-up that matches 0 rows is not an error by itself (someone else may
+// have fixed it first): the re-read decides.
+async function settleLatest(projectId, type, baseName, newRow) {
+  const family = () =>
+    supabase.from('files').select('id, is_latest, created_at').eq('project_id', projectId).eq('type', type).eq('base_name', baseName);
+  const write = (patch) =>
+    supabase.from('files').update(patch).eq('project_id', projectId).eq('type', type).eq('base_name', baseName);
+
+  // 0 rows is normal here (first version of a document), so it is not checked
+  const flip = await write({ is_latest: false }).neq('id', newRow.id).select('id');
+  if (flip.error) throw writeError(flip.error);
+
+  for (let round = 0; round < 4; round++) {
+    const { data, error } = await family();
+    if (error) throw writeError(error);
+    const rows = [...(data || [])].sort(newestFirst);
+    const winner = rows[0];
+    if (!winner) break;
+    const extras = rows.filter((r) => r.id !== winner.id && r.is_latest).map((r) => r.id);
+    if (winner.is_latest && extras.length === 0) return;
+    if (round === 3) break; // the 4th read only verifies
+    if (extras.length) {
+      const r = await write({ is_latest: false }).in('id', extras).select('id');
+      if (r.error) throw writeError(r.error);
+    }
+    if (!winner.is_latest) {
+      const r = await write({ is_latest: true }).eq('id', winner.id).select('id');
+      if (r.error) throw writeError(r.error);
+    }
+  }
+  reportAuthProblem('denied');
+  throw new AppError('อัปโหลดไฟล์แล้ว แต่ตั้งสถานะ "เวอร์ชันล่าสุด" ไม่สำเร็จ — กรุณารีเฟรชหน้า', 'latest_unsettled');
 }
 
 // Update content_text for existing file (used for reindexing)
+// -> true when saved; false when the content_text column does not exist yet; throws when no row was
+// updated (RLS refusal / file deleted meanwhile) or on any other error.
 export async function updateFileContent(fileId, contentText) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('files')
     .update({ content_text: sanitizePgText(contentText) })
-    .eq('id', fileId);
-  if (error && !/content_text/i.test(error.message || '')) throw error;
-  return !error;
+    .eq('id', fileId)
+    .select('id');
+  if (error) {
+    if (/content_text/i.test(error.message || '')) return false;
+    throw writeError(error);
+  }
+  requireAffected(data);
+  return true;
 }
 
-// Get file blob from storage (for reindexing)
-export async function getFileBlob(storagePath) {
-  const res = await fetch(driveFileUrl(storagePath));
+// ---- file bytes: signed, short-lived URLs ----
+// /api/drive-file only serves URLs signed by POST /api/drive-url (valid ~5 minutes), and
+// drive-url checks that the signed-in person may see the file row. So every preview /
+// download / re-index first asks for a fresh URL, then uses it straight away.
+// `fileId` is the files.id (row id), NOT the Drive id in storage_path.
+const FILE_URL_ERRORS = {
+  404: 'ไม่พบไฟล์นี้ หรือไม่มีสิทธิ์เปิดไฟล์นี้',
+  429: 'ขอไฟล์บ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่',
+};
+
+// -> absolute URL string. { download, name } become part of the signature (attachment filename).
+export async function getSignedFileUrl(fileId, { download = false, name } = {}) {
+  if (fileId === undefined || fileId === null || fileId === '') throw new AppError('ไม่พบไฟล์', 'not_found');
+  let res;
+  try {
+    res = await authFetch('/api/drive-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileId, ...(download ? { download: true } : {}), ...(name ? { name } : {}) }),
+    });
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    throw new AppError('เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่อีกครั้ง', 'network');
+  }
+  if (!res.ok) {
+    const { code, message } = await readApiError(res);
+    if (res.status === 401) throw new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+    throw new AppError(
+      apiErrorMessage(res.status, code, message, FILE_URL_ERRORS[res.status] || 'เปิดไฟล์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง'),
+      code
+    );
+  }
+  const body = await res.json().catch(() => null);
+  if (!body?.url || typeof body.url !== 'string') throw new AppError('เปิดไฟล์ไม่สำเร็จ', 'bad_response');
+  // absolute: the Office Online viewer fetches the file from Microsoft's servers
+  return /^https?:\/\//i.test(body.url) ? body.url : `${window.location.origin}${body.url}`;
+}
+
+// fetch() the file bytes. A link that expired between minting and use (403 link_expired)
+// is re-requested ONCE.
+export async function fetchFileResponse(fileId, { download = false, name } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const url = await getSignedFileUrl(fileId, { download, name });
+    const res = await fetch(url);
+    if (res.status === 403 && attempt === 0) {
+      const body = await res.clone().json().catch(() => null);
+      if (body?.error === 'link_expired') continue;
+    }
+    return res;
+  }
+}
+
+// Get file blob (for reindexing)
+export async function getFileBlob(fileId) {
+  const res = await fetchFileResponse(fileId);
   if (!res.ok) throw new Error('ไม่สามารถอ่านไฟล์จาก Google Drive ได้');
   return res.blob();
 }
 
-// Get URL for a file (used by Preview) — proxied through /api/drive-file
-export function getFilePublicUrl(storagePath) {
-  if (!storagePath) return '';
-  return driveFileUrl(storagePath);
-}
-
-// Kept for API compatibility — Drive proxy URL is already access-controlled server-side
-export async function getFileSignedUrl(storagePath) {
-  return getFilePublicUrl(storagePath);
-}
-
 export async function deleteFile(fileId) {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('files')
     .delete()
-    .eq('id', fileId);
-  if (error) throw error;
+    .eq('id', fileId)
+    .select('id');
+  if (error) throw writeError(error);
+  requireAffected(data);
 }
 
 export async function downloadFile(fileId, fileName) {
-  const { data, error } = await supabase
-    .from('files')
-    .select('storage_path')
-    .eq('id', fileId)
-    .single();
-
-  if (error) throw error;
-
-  // Trigger download via the Drive proxy endpoint
-  const url = driveFileUrl(data.storage_path, { download: true, name: fileName });
+  // Fresh signed URL with the download flag (the server answers with Content-Disposition: attachment)
+  const url = await getSignedFileUrl(fileId, { download: true, name: fileName });
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName || 'file';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
   a.click();
+  a.remove();
 }
 
 // ============ ACTIVITY/TIMELINE ============
@@ -298,7 +826,9 @@ export async function fetchActivity(projectId, limit = 6) {
   return data || [];
 }
 
-export async function logActivity(projectId, action, details, fileId = null, { anonymous = false } = {}) {
+// No display name is stored (user decision): who did what is recorded by the database
+// audit trail (admin only). user_id must be the caller's own id (RLS activity_insert).
+export async function logActivity(projectId, action, details, fileId = null) {
   const user = await getCurrentUser();
   const { error } = await supabase
     .from('activity')
@@ -308,7 +838,7 @@ export async function logActivity(projectId, action, details, fileId = null, { a
       details,
       file_id: fileId,
       user_id: user.id,
-      user_name: anonymous ? null : getLocalName() || user.user_metadata?.full_name || user.email
+      user_name: null
     }]);
   if (error) throw error;
 }
@@ -407,6 +937,7 @@ const NO_RECORDER = '-';
 // An UPDATE that RLS filters out succeeds with 0 rows. Surface that as an error.
 function expectRows(data, message) {
   if (!data || data.length === 0) {
+    reportAuthProblem('denied'); // maybe stale permissions: AuthContext re-reads memberships
     throw new Error(message || 'บันทึกไม่สำเร็จ: ไม่มีแถวข้อมูลถูกแก้ไข (อาจไม่มีสิทธิ์ หรือรายการถูกลบไปแล้ว)');
   }
   return data[0];
@@ -757,14 +1288,15 @@ export async function detachFileFromChecklistItem(itemId) {
   return expectRows(data);
 }
 
-// Newest version (is_latest = true) sharing the project + base_name of `file`
-// (same grouping rule uploadFile uses). data = files row | null.
+// Newest version (is_latest = true) of the same family as `file`: project + type + base_name
+// (the grouping the drawer shows and settleLatest/uploadFile maintain). data = files row | null.
 export function fetchLatestVersionOfFile(file) {
   return trackingRead(() =>
     supabase
       .from('files')
       .select('*')
       .eq('project_id', file.project_id)
+      .eq('type', file.type)
       .eq('base_name', file.base_name)
       .eq('is_latest', true)
       .order('created_at', { ascending: false })
@@ -849,7 +1381,7 @@ function assertProjectStatus(status) {
   if (!PROJECT_STATUSES.includes(status)) throw new Error('สถานะโครงการไม่ถูกต้อง');
 }
 
-// Audit line in the activity log (anonymous, like the other tracking writes).
+// Audit line in the activity log (no names are stored, like the other tracking writes).
 // A failure here must never fail the save that already happened.
 async function logStatusChange(projectId, from, to) {
   try {
@@ -857,8 +1389,7 @@ async function logStatusChange(projectId, from, to) {
       projectId,
       'project_status_change',
       `เปลี่ยนสถานะโครงการ: ${from || '-'} → ${to}`,
-      null,
-      { anonymous: true }
+      null
     );
   } catch (err) {
     console.warn('logActivity (project_status_change) failed:', err?.message);
@@ -970,7 +1501,7 @@ export async function updateProjectTracking(projectId, updates = {}) {
   if ('project_co_phone' in payload) parts.push('แก้ไขเบอร์ติดต่อ'); // never the number itself
   if (parts.length > 0) {
     try {
-      await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลติดตามงาน: ${parts.join(', ')}`, null, { anonymous: true });
+      await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลติดตามงาน: ${parts.join(', ')}`);
     } catch (err) {
       console.warn('logActivity (tracking_update) failed:', err?.message);
     }

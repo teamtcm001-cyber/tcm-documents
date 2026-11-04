@@ -6,6 +6,7 @@ import {
   fetchChatIndex,
   fetchFileContents,
   downloadFile,
+  authFetch,
   fetchTrackingOverview,
   fetchInstallments,
 } from '../api/supabase.js'
@@ -37,12 +38,13 @@ function slimContext(ctx) {
 const API_TIMEOUT_MS = 60000
 
 // `extra` carries the grounding fields (see groundingRequest). Their text is never logged.
-// Resolves null when the API is unavailable (error, 401, timeout, fallback signal).
+// Resolves null when the API is unavailable (error, timeout, fallback signal). A 401 / 403
+// account_disabled is also reported app-wide by authFetch (login / "account disabled" screen).
 async function callClaudeAPI(query, ctx, history, extra) {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS)
   try {
-    const response = await fetch('/api/chat', {
+    const response = await authFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, context: slimContext(ctx), history, ...(extra || {}) }),
@@ -366,7 +368,7 @@ export default function AIChat({ open, onClose }) {
       await downloadFile(fileId, fileName)
       toast(`ดาวน์โหลด ${fileName}`)
     } catch (err) {
-      toast('ดาวน์โหลดไม่สำเร็จ', 'err')
+      toast(err?.message || 'ดาวน์โหลดไม่สำเร็จ', 'err')
     }
   }
 

@@ -267,23 +267,15 @@ export function nextInstallmentLine(row) {
   return { text: `${prefix}${no} · ${when}`, tone: d != null && d < 0 ? 'bad' : 'info' }
 }
 
-// ---------- "my projects" (convention only; never enforced) ----------
-const normName = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase()
-
+// ---------- Project Co names ----------
 // project_co may list several coordinators separated by , / ; & or "และ"
-// (display form: trimmed, original case). Shared by isMine and the contact display.
+// (display form: trimmed, original case). Used by the contact display and the AI summaries.
 export function splitCoNames(projectCo) {
   if (!projectCo) return []
   return String(projectCo)
     .split(/[,/;&]|\sและ\s/)
     .map((s) => s.trim())
     .filter(Boolean)
-}
-
-export function isMine(projectCo, localName) {
-  const me = normName(localName)
-  if (!me || !projectCo) return false
-  return splitCoNames(projectCo).map(normName).filter(Boolean).includes(me)
 }
 
 // ---------- Project Co contact phone (projects.project_co_phone) ----------

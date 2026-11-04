@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import Icon from './Icon.jsx'
 import { fetchProjects, fetchFiles } from '../api/supabase.js'
+import { useAuth } from '../auth/AuthContext.jsx'
+import { NoProjectsNotice, ReadOnlyBadge } from './AccessBits.jsx'
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
 
 function StatCards({ projects, files }) {
@@ -143,6 +145,7 @@ function RecentActivity({ files, projects }) {
 }
 
 export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZipProject, onNewProject }) {
+  const { isExec, isMember, canUploadAny } = useAuth()
   const [projects, setProjects] = useState([])
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
@@ -196,13 +199,19 @@ export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZ
             <h2>ภาพรวมระบบ</h2>
             <div className="sub">ข้อมูลล่าสุดของระบบจัดการเอกสาร · อัปเดตทุก {fmtDate(new Date().toISOString().slice(0, 10))}</div>
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-ghost btn-sm" onClick={onNewProject}>
-              <Icon name="plus" size={14} /> โครงการใหม่
-            </button>
-            <button className="btn btn-primary btn-sm" onClick={onOpenUpload}>
-              <Icon name="plus" size={14} /> เพิ่มเอกสาร
-            </button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {isExec && <ReadOnlyBadge title="ผู้บริหารเห็นทุกโครงการแบบอ่านอย่างเดียว" />}
+            {isMember && !canUploadAny && projects.length > 0 && <ReadOnlyBadge title="คุณได้รับสิทธิ์ดูอย่างเดียวในทุกโครงการที่เห็น" />}
+            {onNewProject && (
+              <button className="btn btn-ghost btn-sm" onClick={onNewProject}>
+                <Icon name="plus" size={14} /> โครงการใหม่
+              </button>
+            )}
+            {canUploadAny && (
+              <button className="btn btn-primary btn-sm" onClick={onOpenUpload}>
+                <Icon name="plus" size={14} /> เพิ่มเอกสาร
+              </button>
+            )}
           </div>
         </div>
 
@@ -219,13 +228,7 @@ export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZ
               </a>
             </h3>
             {projInfo.length === 0 ? (
-              <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--gray-500)' }}>
-                <Icon name="folder" size={32} />
-                <div style={{ marginTop: 8 }}>ยังไม่มีโครงการ</div>
-                <button className="btn btn-primary btn-sm" onClick={onNewProject} style={{ marginTop: 16 }}>
-                  <Icon name="plus" size={14} /> สร้างโครงการแรก
-                </button>
-              </div>
+              <NoProjectsNotice onNewProject={onNewProject} />
             ) : (
               <div className="proj-list">
                 {projInfo.map(({ project, fileCount, latestDate }) => (

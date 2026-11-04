@@ -2,10 +2,17 @@ import { useState, useEffect, useRef } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import { fetchProjects, uploadFile, logActivity } from '../api/supabase.js'
+import { useAuth } from '../auth/AuthContext.jsx'
 import { fmtSize, detectType, detectVersion, TYPE_LABEL, TYPE_COLOR, TYPE_KEYS } from '../utils/format.js'
 import { extractText } from '../utils/textExtract.js'
 
-export default function UploadModal({ user, onClose, onUploaded }) {
+// errors that make every further file in this batch fail too (no access, session over, server unreachable, throttled)
+const STOP_CODES = new Set([
+  'unauthorized', 'forbidden', 'no_access', 'rate_limited', 'auth_unavailable', 'password_change_required', 'account_disabled', 'unsure_outcome',
+])
+
+export default function UploadModal({ onClose, onUploaded }) {
+  const { canEditProject } = useAuth()
   const [projects, setProjects] = useState([])
   const [projId, setProjId] = useState('')
   const [type, setType] = useState('auto')
@@ -16,7 +23,9 @@ export default function UploadModal({ user, onClose, onUploaded }) {
   const toast = useToast()
 
   useEffect(() => {
-    fetchProjects().then((data) => {
+    // only projects the person may write to (RLS rejects the rest anyway)
+    fetchProjects().then((all) => {
+      const data = all.filter((p) => canEditProject(p.id))
       setProjects(data)
       if (data.length > 0) setProjId(data[0].id)
     })
@@ -85,15 +94,23 @@ export default function UploadModal({ user, onClose, onUploaded }) {
         }
         setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 70 } : x)))
 
-        await uploadFile(projId, it.file, it.type, null, contentText)
+        const saved = await uploadFile(projId, it.file, it.type, null, contentText)
+        // saved, but the "latest version" bookkeeping could not be completed: warn, do not fail the upload
+        if (saved?._warning) toast(`${it.name}: ${saved._warning}`, 'err')
         try {
-          await logActivity(projId, 'upload', `อัปโหลด ${it.name}`, null, { anonymous: true })
+          await logActivity(projId, 'upload', `อัปโหลด ${it.name}`)
         } catch (_) {}
         setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 100, done: true } : x)))
         ok++
       } catch (err) {
         fail++
-        toast(`อัปโหลด ${it.name} ไม่สำเร็จ: ${err.message}`, 'err')
+        // 'unsure_outcome' is not a known failure: the message itself tells the person what to check
+        toast(err?.code === 'unsure_outcome' ? `${it.name}: ${err.message}` : `อัปโหลด ${it.name} ไม่สำเร็จ: ${err.message}`, 'err')
+        // the next files would hit the same wall: stop and tell the person once
+        if (STOP_CODES.has(err?.code)) {
+          if (items.length > fail + ok) toast('หยุดการอัปโหลดไฟล์ที่เหลือ — แก้ไขปัญหาข้างต้นแล้วลองใหม่', 'err')
+          break
+        }
       }
     }
     setSubmitting(false)
@@ -119,7 +136,7 @@ export default function UploadModal({ user, onClose, onUploaded }) {
               <label>โครงการ</label>
               {projects.length === 0 ? (
                 <div className="muted small" style={{ padding: '10px 12px', background: 'var(--gray-100)', borderRadius: 8 }}>
-                  ยังไม่มีโครงการ
+                  ไม่มีโครงการที่คุณมีสิทธิ์อัปโหลด
                 </div>
               ) : (
                 <select value={projId} onChange={(e) => setProjId(e.target.value)}>

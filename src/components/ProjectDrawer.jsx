@@ -8,9 +8,12 @@ import { statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM } from '../
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
 import { extractTextFromBlobDetailed, RESULT } from '../utils/textExtract.js'
 import PreviewModal from './PreviewModal.jsx'
+import Dialog from './ui/Dialog.jsx'
+import { ReadOnlyBadge } from './AccessBits.jsx'
+import { useAuth } from '../auth/AuthContext.jsx'
 import { CoContact } from './TrackingBits.jsx'
 
-function FileRow({ file, onDelete, onDownload, onPreview }) {
+function FileRow({ file, canEdit, onDelete, onDownload, onPreview }) {
   const color = TYPE_COLOR[file.type] || '#6B7280'
   const label = TYPE_LABEL[file.type] || file.type
   return (
@@ -40,22 +43,27 @@ function FileRow({ file, onDelete, onDownload, onPreview }) {
         <button className="icon-btn" title="ดาวน์โหลด" onClick={() => onDownload(file)}>
           <Icon name="download" size={15} />
         </button>
-        <button
-          className="icon-btn danger"
-          title="ลบ"
-          onClick={() => {
-            const msg = `ลบไฟล์ "${file.name}" ?\n\nไฟล์จะถูกลบถาวร และจะถูกถอดออกจากเช็กลิสต์งวดเบิกที่แนบไว้`
-            if (window.confirm(msg)) onDelete(file)
-          }}
-        >
-          <Icon name="trash" size={15} />
-        </button>
+        {canEdit && (
+          <button
+            className="icon-btn danger"
+            title="ลบ"
+            aria-label={`ลบไฟล์ ${file.name}`}
+            onClick={() => {
+              const msg = `ลบไฟล์ "${file.name}" ?\n\nไฟล์จะถูกลบถาวร และจะถูกถอดออกจากเช็กลิสต์งวดเบิกที่แนบไว้`
+              if (window.confirm(msg)) onDelete(file)
+            }}
+          >
+            <Icon name="trash" size={15} />
+          </button>
+        )}
       </div>
     </div>
   )
 }
 
 export default function ProjectDrawer({ project, refreshKey, onClose, onChanged, onOpenTracking, onStatusChanged }) {
+  const { canEditProject, canDeleteProject } = useAuth()
+  const canEdit = canEditProject(project?.id)
   const [statusSaving, setStatusSaving] = useState(false)
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
@@ -92,7 +100,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       await downloadFile(file.id, file.name)
       toast(`ดาวน์โหลด ${file.name}`)
     } catch (err) {
-      toast('ดาวน์โหลดไม่สำเร็จ', 'err')
+      toast(err?.message || 'ดาวน์โหลดไม่สำเร็จ', 'err')
     }
   }
 
@@ -103,7 +111,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       await load()
       onChanged?.()
     } catch (err) {
-      toast('ลบไม่สำเร็จ', 'err')
+      toast(err?.message || 'ลบไม่สำเร็จ', 'err')
     }
   }
 
@@ -139,7 +147,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       onChanged?.()
       onClose()
     } catch (err) {
-      toast('ลบโครงการไม่สำเร็จ', 'err')
+      toast(err?.message || 'ลบโครงการไม่สำเร็จ', 'err')
     }
   }
 
@@ -162,7 +170,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       const f = needIndex[i]
       setReindexProgress({ current: i + 1, total: needIndex.length })
       try {
-        const blob = await getFileBlob(f.storagePath)
+        const blob = await getFileBlob(f.id)
         const result = await extractTextFromBlobDetailed(blob, f.name)
 
         if (result.status === RESULT.SUCCESS) {
@@ -180,6 +188,12 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       } catch (err) {
         console.error('Reindex error:', f.name, err)
         failList.push({ name: f.name, reason: err?.message || 'ดาวน์โหลดไฟล์ไม่สำเร็จ' })
+        // no permission / session over: the remaining files would fail the same way
+        if (['no_access', 'unauthorized', 'auth_unavailable', 'rate_limited'].includes(err?.code)) {
+          const rest = needIndex.length - i - 1
+          if (rest > 0) failList.push({ name: `อีก ${rest} ไฟล์`, reason: 'ข้ามไป เพราะขั้นตอนก่อนหน้าไม่สำเร็จ' })
+          break
+        }
       }
     }
 
@@ -237,7 +251,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
               }}
             >
               {project.code} ·{' '}
-              {onStatusChanged ? (
+              {onStatusChanged && canEdit ? (
                 <select
                   className="drawer-status-select"
                   aria-label="สถานะโครงการ"
@@ -278,7 +292,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                 <Icon name="user" size={13} /> Project Co:{' '}
                 <CoContact co={project.project_co} phone={project.project_co_phone} empty={null} />
               </span>
-              {onOpenTracking && (
+              {onOpenTracking && canEdit && (
                 <button
                   type="button"
                   className="drawer-co-edit"
@@ -288,6 +302,11 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                   ตั้งค่า
                 </button>
               )}
+            </div>
+          )}
+          {!canEdit && (
+            <div style={{ marginTop: 10 }}>
+              <ReadOnlyBadge className="on-dark" />
             </div>
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
@@ -308,34 +327,38 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                 <Icon name="trend-up" size={13} /> ติดตามงาน
               </button>
             )}
-            <button
-              className="btn btn-sm"
-              style={{
-                background: 'rgba(255,255,255,0.15)',
-                color: 'white',
-                border: '1px solid rgba(255,255,255,0.2)',
-              }}
-              onClick={handleReindex}
-              disabled={reindexing}
-              title="สกัดข้อความจากเอกสารเก่า เพื่อให้ AI ค้นในเนื้อหาได้"
-            >
-              <Icon name="sparkles" size={13} />
-              {reindexing
-                ? `กำลัง index... ${reindexProgress.current}/${reindexProgress.total}`
-                : 'Re-index เนื้อหา'}
-            </button>
-            <button
-              className="btn btn-sm"
-              style={{
-                background: 'rgba(229,72,77,0.2)',
-                color: 'white',
-                border: '1px solid rgba(229,72,77,0.4)',
-                marginLeft: 'auto',
-              }}
-              onClick={handleDeleteProject}
-            >
-              <Icon name="trash" size={13} /> ลบโครงการ
-            </button>
+            {canEdit && (
+              <button
+                className="btn btn-sm"
+                style={{
+                  background: 'rgba(255,255,255,0.15)',
+                  color: 'white',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                }}
+                onClick={handleReindex}
+                disabled={reindexing}
+                title="สกัดข้อความจากเอกสารเก่า เพื่อให้ AI ค้นในเนื้อหาได้"
+              >
+                <Icon name="sparkles" size={13} />
+                {reindexing
+                  ? `กำลัง index... ${reindexProgress.current}/${reindexProgress.total}`
+                  : 'Re-index เนื้อหา'}
+              </button>
+            )}
+            {canDeleteProject && (
+              <button
+                className="btn btn-sm"
+                style={{
+                  background: 'rgba(229,72,77,0.2)',
+                  color: 'white',
+                  border: '1px solid rgba(229,72,77,0.4)',
+                  marginLeft: 'auto',
+                }}
+                onClick={handleDeleteProject}
+              >
+                <Icon name="trash" size={13} /> ลบโครงการ
+              </button>
+            )}
           </div>
         </div>
 
@@ -403,6 +426,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                       <FileRow
                         key={f.id}
                         file={f}
+                        canEdit={canEdit}
                         onDelete={handleDelete}
                         onDownload={handleDownload}
                         onPreview={setPreviewFile}
@@ -430,14 +454,15 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
 function ReindexReportModal({ report, onClose }) {
   const { ok = [], failed = [], empty = [] } = report
   return (
-    <div className="modal-backdrop" onClick={onClose} style={{ zIndex: 250 }}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>📊 Re-index Report</h3>
-          <button className="icon-btn" onClick={onClose}>
-            <Icon name="close" size={18} />
-          </button>
-        </div>
+    <Dialog
+      title="📊 Re-index Report"
+      onClose={onClose}
+      footer={
+        <button className="btn btn-primary" onClick={onClose} data-autofocus>
+          <Icon name="check" size={14} /> รับทราบ
+        </button>
+      }
+    >
         <div className="modal-body">
           <div style={{ display: 'flex', gap: 12, marginBottom: 18 }}>
             <div style={{ flex: 1, padding: 12, background: 'var(--green-50)', borderRadius: 8 }}>
@@ -535,18 +560,12 @@ function ReindexReportModal({ report, onClose }) {
                   </li>
                 )}
                 <li>
-                  <strong>ข้อมูลเพิ่มเติม:</strong> ระบบยังค้นหาด้วย <em>ชื่อไฟล์ · ประเภท · วันที่ · ผู้อัพ</em> ได้ปกติ
+                  <strong>ข้อมูลเพิ่มเติม:</strong> ระบบยังค้นหาด้วย <em>ชื่อไฟล์ · ประเภท · วันที่</em> ได้ปกติ
                 </li>
               </ul>
             </div>
           )}
         </div>
-        <div className="modal-foot">
-          <button className="btn btn-primary" onClick={onClose}>
-            <Icon name="check" size={14} /> รับทราบ
-          </button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
   )
 }

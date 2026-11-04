@@ -41,7 +41,7 @@ function Stepper({ status }) {
 }
 
 // ---------- one installment ----------
-function InstallmentCard({ inst, open, onToggle, onChanged, onDeleted, onOpenUpload }) {
+function InstallmentCard({ inst, open, canEdit, onToggle, onChanged, onDeleted, onOpenUpload }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
   const [no, setNo] = useState(String(inst.installment_no))
@@ -202,7 +202,7 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onDeleted, onOpenUpl
 
       {open && (
         <div className="trk-inst-body" id={bodyId}>
-          {editing ? (
+          {editing && canEdit ? (
             <form className="trk-edit" onSubmit={saveEdit} noValidate>
               <div className="trk-form-row">
                 <div className="field" style={{ flex: '0 1 100px' }}>
@@ -276,14 +276,17 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onDeleted, onOpenUpl
                 <span className="muted small">หมายเหตุทั่วไป</span>
                 <div>{inst.note || <span className="muted">-</span>}</div>
               </div>
-              <button type="button" className="trk-link-btn" onClick={startEdit}>
-                <Icon name="pen" size={13} /> แก้ไขงวด
-              </button>
+              {canEdit && (
+                <button type="button" className="trk-link-btn" onClick={startEdit}>
+                  <Icon name="pen" size={13} /> แก้ไขงวด
+                </button>
+              )}
             </div>
           )}
 
           <Stepper status={inst.status} />
 
+          {canEdit && (
           <form className="trk-status-form" onSubmit={changeStatus}>
             <div className="field" style={{ flex: '1 1 180px' }}>
               <label htmlFor={`s-${bodyId}`}>เปลี่ยนสถานะ</label>
@@ -320,12 +323,14 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onDeleted, onOpenUpl
               <Icon name="check" size={13} /> บันทึกสถานะ
             </button>
           </form>
+          )}
 
           <div className="muted small">แก้ไขล่าสุด {fmtThaiDateTime(inst.updated_at)}</div>
 
           <TrackingChecklist
             installment={inst}
             projectId={inst.project_id}
+            canEdit={canEdit}
             onChanged={onChanged}
             onOpenUpload={onOpenUpload}
           />
@@ -336,7 +341,7 @@ function InstallmentCard({ inst, open, onToggle, onChanged, onDeleted, onOpenUpl
 }
 
 // ---------- list ----------
-export default function TrackingInstallments({ installments, projectId, onChanged, onOpenUpload }) {
+export default function TrackingInstallments({ installments, projectId, canEdit = false, onChanged, onOpenUpload }) {
   const toast = useToast()
   // Start with the first installment still to bill expanded; the choice is then
   // pinned so it does not collapse when that installment's status changes.
@@ -382,12 +387,14 @@ export default function TrackingInstallments({ installments, projectId, onChange
           <Icon name="layers" size={16} /> งวดงาน / งวดเบิก
           {counted > 0 && <span className="muted small" style={{ fontWeight: 400 }}> · เบิกแล้ว {billed}/{counted} งวด</span>}
         </h3>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAdding((v) => !v)} aria-expanded={adding}>
-          <Icon name="plus" size={13} /> เพิ่มงวด
-        </button>
+        {canEdit && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAdding((v) => !v)} aria-expanded={adding}>
+            <Icon name="plus" size={13} /> เพิ่มงวด
+          </button>
+        )}
       </div>
 
-      {adding && (
+      {adding && canEdit && (
         <form className="trk-edit" onSubmit={add}>
           <div className="trk-form-row">
             <div className="field" style={{ flex: '2 1 220px' }}>
@@ -416,7 +423,9 @@ export default function TrackingInstallments({ installments, projectId, onChange
       )}
 
       {installments.length === 0 ? (
-        <div className="trk-empty">ยังไม่มีงวดงาน — กด "เพิ่มงวด" เพื่อเริ่มติดตามการเบิก</div>
+        <div className="trk-empty">
+          {canEdit ? 'ยังไม่มีงวดงาน — กด "เพิ่มงวด" เพื่อเริ่มติดตามการเบิก' : 'ยังไม่มีงวดงาน'}
+        </div>
       ) : (
         <div className="trk-inst-list">
           {installments.map((inst) => (
@@ -424,6 +433,7 @@ export default function TrackingInstallments({ installments, projectId, onChange
               key={inst.installment_id}
               inst={inst}
               open={openId === inst.installment_id}
+              canEdit={canEdit}
               onToggle={() => setOpenId(openId === inst.installment_id ? null : inst.installment_id)}
               onChanged={onChanged}
               onDeleted={(id) => setOpenId((cur) => (cur === id ? null : cur))}

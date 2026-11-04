@@ -1,102 +1,59 @@
 import { useState, useEffect } from 'react'
-import { supabase, getCurrentUser, signIn, logVisit, fetchProjects, fetchLatestFiles } from './api/supabase.js'
+import { supabase, fetchProjects, fetchLatestFiles } from './api/supabase.js'
 import { normalizeFile } from './utils/format.js'
-import { getLocalName } from './utils/localIdentity.js'
+import { AuthProvider, useAuth } from './auth/AuthContext.jsx'
 import { ToastProvider } from './components/Toast.jsx'
-import NameGate from './components/NameGate.jsx'
+import LoginScreen from './components/LoginScreen.jsx'
+import { LoadingScreen, DisabledScreen, ProfileErrorScreen } from './components/AuthScreens.jsx'
+import { ForcedPasswordScreen, ChangePasswordDialog } from './components/ChangePassword.jsx'
 import Topbar from './components/Topbar.jsx'
 import Hero from './components/Hero.jsx'
 import Dashboard from './components/Dashboard.jsx'
 import Tracking from './components/Tracking.jsx'
+import AdminConsole from './components/AdminConsole.jsx'
 import ProjectDrawer from './components/ProjectDrawer.jsx'
 import UploadModal from './components/UploadModal.jsx'
 import NewProjectModal from './components/NewProjectModal.jsx'
 import AIChat, { ChatFab } from './components/AIChat.jsx'
 
-// No login screen — every visitor is signed in as one shared account behind
-// the scenes so Supabase RLS (which requires an authenticated session) keeps
-// working. Activity/uploads all show up under this shared account.
-const SHARED_EMAIL = import.meta.env.VITE_SHARED_ACCOUNT_EMAIL
-const SHARED_PASSWORD = import.meta.env.VITE_SHARED_ACCOUNT_PASSWORD
-
+// Real per-person login. Order of screens:
+//   loading -> login -> (forced "set a new password") -> app
+// plus two blocking states: "account disabled" and "could not read the account".
+// What a person may see/do is decided by the database (RLS); the UI mirrors it (see AuthContext).
 export default function App() {
-  const [user, setUser] = useState(null)
-  const [authError, setAuthError] = useState(null)
-  const [localName, setLocalNameState] = useState(() => getLocalName())
-  const [editingName, setEditingName] = useState(false)
-
-  useEffect(() => {
-    // getCurrentUser() rejects (not resolves to null) when there's no session yet,
-    // e.g. a fresh browser — treat that as "not signed in", not a fatal error.
-    getCurrentUser()
-      .catch(() => null)
-      .then((u) => u || signIn(SHARED_EMAIL, SHARED_PASSWORD).then((r) => r.user))
-      .then(setUser)
-      .catch((err) => {
-        console.error('shared sign-in failed:', err)
-        setAuthError(err.message || 'เข้าใช้งานระบบไม่สำเร็จ')
-      })
-  }, [])
-
-  if (authError) {
-    return (
-      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' }}>
-        <div>
-          <p>ไม่สามารถเชื่อมต่อระบบได้: {authError}</p>
-          <p className="muted small">ลองรีเฟรชหน้านี้ใหม่อีกครั้ง</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
-        <div className="spinner"></div>
-      </div>
-    )
-  }
-
-  if (!localName || editingName) {
-    return (
-      <NameGate
-        initialValue={localName}
-        onDone={(n) => {
-          setLocalNameState(n)
-          setEditingName(false)
-        }}
-        onCancel={localName ? () => setEditingName(false) : undefined}
-      />
-    )
-  }
-
-  // Overlay the self-reported name onto the shared account's user object so
-  // every existing user_metadata.full_name read (Topbar, uploads) shows
-  // the real person instead of the shared account for everyone.
-  const displayUser = { ...user, user_metadata: { ...user.user_metadata, full_name: localName } }
-
-  return <Ready displayUser={displayUser} localName={localName} onChangeName={() => setEditingName(true)} />
-}
-
-// Logs one visit row per app load (covers both first-time name entry and
-// returning visitors whose name is already cached) — the only backend trail
-// of who's using the app, since everyone otherwise shares one account.
-function Ready({ displayUser, localName, onChangeName }) {
-  useEffect(() => {
-    logVisit(localName)
-  }, [localName])
-
   return (
     <ToastProvider>
-      <MainApp user={displayUser} onChangeName={onChangeName} />
+      <AuthProvider>
+        <Gate />
+      </AuthProvider>
     </ToastProvider>
   )
 }
 
-function MainApp({ user, onChangeName }) {
+function Gate() {
+  const { status } = useAuth()
+  switch (status) {
+    case 'ready':
+      return <MainApp />
+    case 'signedOut':
+      return <LoginScreen />
+    case 'mustChange':
+      return <ForcedPasswordScreen />
+    case 'disabled':
+      return <DisabledScreen />
+    case 'error':
+      return <ProfileErrorScreen />
+    default:
+      return <LoadingScreen />
+  }
+}
+
+function MainApp() {
+  const { isAdmin, canCreateProject, canUploadAny, membershipsFailed, accessVersion } = useAuth()
   const [active, setActive] = useState('dashboard')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [drawerProject, setDrawerProject] = useState(null)
   const [trackingProjectId, setTrackingProjectId] = useState(null)
@@ -107,9 +64,18 @@ function MainApp({ user, onChangeName }) {
 
   const refresh = () => setRefreshKey((k) => k + 1)
 
+  // an admin changed this person's access while the tab was open: reload what is on screen
+  useEffect(() => {
+    if (accessVersion > 0) {
+      setDrawerProject(null)
+      refresh()
+    }
+  }, [accessVersion])
+
   // Clicking the "ติดตามงาน" tab always returns to the cross-project overview.
   const handleNav = (id) => {
     if (id === 'tracking') setTrackingProjectId(null)
+    if (id === 'admin' && !isAdmin) return
     setActive(id)
   }
 
@@ -118,6 +84,10 @@ function MainApp({ user, onChangeName }) {
     setDrawerProject(null)
     setTrackingProjectId(project.id)
     setActive('tracking')
+  }
+
+  const openUpload = () => {
+    if (canUploadAny) setUploadOpen(true)
   }
 
   useEffect(() => {
@@ -177,22 +147,31 @@ function MainApp({ user, onChangeName }) {
     }
   }
 
+  const view = active === 'admin' && !isAdmin ? 'dashboard' : active
+
   return (
     <div className="app">
       <Topbar
-        user={user}
-        active={active}
+        active={view}
         onNav={handleNav}
-        onOpenUpload={() => setUploadOpen(true)}
+        onOpenUpload={openUpload}
         onOpenChat={() => setChatOpen(true)}
-        onChangeName={onChangeName}
+        onChangePassword={() => setPasswordOpen(true)}
       />
 
-      {active === 'tracking' ? (
+      {membershipsFailed && (
+        <div className="access-warning" role="alert">
+          โหลดสิทธิ์รายโครงการของคุณไม่สำเร็จ — ระบบจึงแสดงเป็นอ่านอย่างเดียวชั่วคราว ลองรีเฟรชหน้านี้อีกครั้ง
+        </div>
+      )}
+
+      {view === 'admin' ? (
+        <AdminConsole />
+      ) : view === 'tracking' ? (
         <Tracking
           projectId={trackingProjectId}
           onSelectProject={setTrackingProjectId}
-          onOpenUpload={() => setUploadOpen(true)}
+          onOpenUpload={openUpload}
           onProjectChanged={refresh}
         />
       ) : (
@@ -201,15 +180,16 @@ function MainApp({ user, onChangeName }) {
             stats={heroStats}
             recentFiles={heroFiles}
             projects={heroProjects}
-            onUpload={() => setUploadOpen(true)}
+            canUpload={canUploadAny}
+            onUpload={openUpload}
             onAsk={() => setChatOpen(true)}
           />
 
           <Dashboard
             refreshKey={refreshKey}
             onOpenProject={openProjectById}
-            onOpenUpload={() => setUploadOpen(true)}
-            onNewProject={() => setNewProjectOpen(true)}
+            onOpenUpload={openUpload}
+            onNewProject={canCreateProject ? () => setNewProjectOpen(true) : undefined}
           />
         </>
       )}
@@ -235,20 +215,21 @@ function MainApp({ user, onChangeName }) {
         />
       )}
 
-      {uploadOpen && (
+      {uploadOpen && canUploadAny && (
         <UploadModal
-          user={user}
           onClose={() => setUploadOpen(false)}
           onUploaded={refresh}
         />
       )}
 
-      {newProjectOpen && (
+      {newProjectOpen && canCreateProject && (
         <NewProjectModal
           onClose={() => setNewProjectOpen(false)}
           onCreated={refresh}
         />
       )}
+
+      {passwordOpen && <ChangePasswordDialog onClose={() => setPasswordOpen(false)} />}
 
       {!chatOpen && <ChatFab onClick={() => setChatOpen(true)} />}
       <AIChat open={chatOpen} onClose={() => setChatOpen(false)} />

@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
-import { getFilePublicUrl, downloadFile } from '../api/supabase.js'
+import { getSignedFileUrl, fetchFileResponse, downloadFile } from '../api/supabase.js'
 import { fmtSize, fmtDate, TYPE_LABEL, TYPE_COLOR } from '../utils/format.js'
 
 // Detect file category from extension
@@ -18,56 +18,123 @@ function getFileCategory(ext) {
   return 'unknown'
 }
 
+// Categories shown through a signed URL (iframe / img / video / audio / Office viewer).
+// Plain text is fetched as bytes, anything else shows extracted text or a download prompt.
+const EMBED_CATEGORIES = ['pdf', 'image', 'word', 'excel', 'powerpoint', 'video', 'audio']
+
 export default function PreviewModal({ file, onClose }) {
   const [textContent, setTextContent] = useState('')
   const [loadingText, setLoadingText] = useState(false)
   const [loadError, setLoadError] = useState(null)
+  // Signed, short-lived URL from POST /api/drive-url (the server checks the person may see this file)
+  const [url, setUrl] = useState('')
+  const [urlError, setUrlError] = useState('')
+  const [urlTick, setUrlTick] = useState(0)
+  const reminted = useRef(false)
   const toast = useToast()
 
-  const url = getFilePublicUrl(file.storagePath)
   const ext = (file.ext || file.name?.split('.').pop() || '').toLowerCase()
   const category = getFileCategory(ext)
+  const needsUrl = EMBED_CATEGORIES.includes(category)
   const typeColor = TYPE_COLOR[file.type] || '#6B7280'
   const typeLabel = TYPE_LABEL[file.type] || file.type
 
   useEffect(() => {
-    // Load text content for plain text files
-    if (category === 'text' && url) {
-      setLoadingText(true)
-      fetch(url)
-        .then((r) => {
-          if (!r.ok) throw new Error('โหลดไฟล์ไม่สำเร็จ')
-          return r.text()
-        })
-        .then((t) => {
-          // Strip BOM if present
-          const cleaned = t.replace(/^﻿/, '')
-          setTextContent(cleaned.slice(0, 200000)) // limit 200KB
-          setLoadingText(false)
-        })
-        .catch((err) => {
-          setLoadError(err.message || 'โหลดไฟล์ไม่สำเร็จ')
-          setLoadingText(false)
-        })
+    if (!needsUrl) return undefined
+    let alive = true
+    setUrl('')
+    setUrlError('')
+    getSignedFileUrl(file.id)
+      .then((u) => alive && setUrl(u))
+      .catch((err) => alive && setUrlError(err?.message || 'เปิดไฟล์ไม่สำเร็จ'))
+    return () => {
+      alive = false
     }
-  }, [url, category])
+  }, [file.id, needsUrl, urlTick])
+
+  // A link lives ~5 minutes. If media stops loading because it expired, ask for a new one (once).
+  const handleMediaError = () => {
+    if (reminted.current) return
+    reminted.current = true
+    setUrlTick((n) => n + 1)
+  }
+
+  useEffect(() => {
+    // Load text content for plain text files
+    if (category !== 'text') return undefined
+    let alive = true
+    setLoadingText(true)
+    setLoadError(null)
+    fetchFileResponse(file.id)
+      .then((r) => {
+        if (!r.ok) throw new Error('โหลดไฟล์ไม่สำเร็จ')
+        return r.text()
+      })
+      .then((t) => {
+        if (!alive) return
+        // Strip BOM if present
+        const cleaned = t.replace(/^\uFEFF/, '')
+        setTextContent(cleaned.slice(0, 200000)) // limit 200KB
+        setLoadingText(false)
+      })
+      .catch((err) => {
+        if (!alive) return
+        setLoadError(err.message || 'โหลดไฟล์ไม่สำเร็จ')
+        setLoadingText(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [file.id, category])
 
   const handleDownload = async () => {
     try {
       await downloadFile(file.id, file.name)
       toast(`ดาวน์โหลด ${file.name}`)
     } catch (err) {
-      toast('ดาวน์โหลดไม่สำเร็จ', 'err')
+      toast(err?.message || 'ดาวน์โหลดไม่สำเร็จ', 'err')
     }
   }
 
-  const handleOpenNewTab = () => {
-    if (url) window.open(url, '_blank', 'noopener,noreferrer')
+  // Always a fresh link (the one in the viewer may be old). The tab is opened first so the
+  // browser does not treat it as a pop-up, then pointed at the file.
+  const handleOpenNewTab = async () => {
+    const w = window.open('about:blank', '_blank')
+    try {
+      const u = await getSignedFileUrl(file.id)
+      if (w) {
+        w.opener = null
+        w.location.href = u
+      } else {
+        window.location.assign(u)
+      }
+    } catch (err) {
+      if (w) w.close()
+      toast(err?.message || 'เปิดไฟล์ไม่สำเร็จ', 'err')
+    }
   }
 
   // Render preview content based on category
   let previewContent
-  switch (category) {
+  const waitingForUrl = needsUrl && !url
+  switch (waitingForUrl ? 'waiting' : category) {
+    case 'waiting':
+      previewContent = urlError ? (
+        <div className="preview-center" role="alert">
+          <Icon name="alert" size={32} style={{ color: 'var(--red)' }} />
+          <div style={{ marginTop: 12, color: 'var(--red)', textAlign: 'center', maxWidth: 360 }}>{urlError}</div>
+          <button className="btn btn-ghost btn-sm" style={{ marginTop: 14 }} onClick={() => setUrlTick((n) => n + 1)}>
+            <Icon name="refresh" size={14} /> ลองอีกครั้ง
+          </button>
+        </div>
+      ) : (
+        <div className="preview-center">
+          <div className="spinner"></div>
+          <div style={{ marginTop: 12, color: 'var(--gray-500)' }}>กำลังเตรียมไฟล์...</div>
+        </div>
+      )
+      break
+
     case 'pdf':
       previewContent = (
         <iframe
@@ -81,7 +148,7 @@ export default function PreviewModal({ file, onClose }) {
     case 'image':
       previewContent = (
         <div className="preview-image-wrap">
-          <img src={url} alt={file.name} />
+          <img src={url} alt={file.name} onError={handleMediaError} />
         </div>
       )
       break
@@ -160,7 +227,7 @@ export default function PreviewModal({ file, onClose }) {
     case 'video':
       previewContent = (
         <div className="preview-center" style={{ background: '#000' }}>
-          <video src={url} controls style={{ maxWidth: '100%', maxHeight: '100%' }}>
+          <video src={url} controls onError={handleMediaError} style={{ maxWidth: '100%', maxHeight: '100%' }}>
             ไม่รองรับการเล่นวิดีโอใน browser นี้
           </video>
         </div>
@@ -172,7 +239,7 @@ export default function PreviewModal({ file, onClose }) {
         <div className="preview-center">
           <Icon name="file" size={48} style={{ color: 'var(--steel)' }} />
           <div style={{ marginTop: 16, fontSize: 14, color: 'var(--gray-700)' }}>{file.name}</div>
-          <audio src={url} controls style={{ marginTop: 16 }}>
+          <audio src={url} controls onError={handleMediaError} style={{ marginTop: 16 }}>
             ไม่รองรับการเล่นเสียงใน browser นี้
           </audio>
         </div>
@@ -255,7 +322,7 @@ export default function PreviewModal({ file, onClose }) {
 
   return (
     <div className="preview-backdrop" onClick={onClose}>
-      <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="preview-modal" role="dialog" aria-modal="true" aria-label={file.name} onClick={(e) => e.stopPropagation()}>
         <div className="preview-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
             <div

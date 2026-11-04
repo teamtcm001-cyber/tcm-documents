@@ -4,18 +4,21 @@ import { useToast } from './Toast.jsx'
 import {
   fetchProjectTrackingRow, fetchProgressHistory, fetchInstallments, updateProjectTracking, updateProjectStatus,
 } from '../api/supabase.js'
-import { getLocalName } from '../utils/localIdentity.js'
+import { useAuth } from '../auth/AuthContext.jsx'
+import { ReadOnlyBadge } from './AccessBits.jsx'
 import {
-  computeHealth, fmtThaiDate, isIsoDate, isSaneDate, isMine, INSANE_DATE_MESSAGE, phoneError, normalizePhones,
+  computeHealth, fmtThaiDate, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, phoneError, normalizePhones,
   statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM,
 } from '../utils/tracking.js'
-import { HealthChip, ToneBadge, ProjectStatusBadge, NotInstalledNotice, ErrorNotice, CoContact } from './TrackingBits.jsx'
+import { HealthChip, ProjectStatusBadge, NotInstalledNotice, ErrorNotice, CoContact } from './TrackingBits.jsx'
 import TrackingProgress from './TrackingProgress.jsx'
 import TrackingInstallments from './TrackingInstallments.jsx'
 
-function ProjectHeader({ row, health, onSaved }) {
+function ProjectHeader({ row, health, canEdit, onSaved }) {
   const toast = useToast()
-  const localName = getLocalName()
+  const { profile } = useAuth()
+  // the signed-in person's own name, offered as a shortcut for the Project Co field (never recorded as "who edited")
+  const myName = profile?.full_name || ''
   const [editing, setEditing] = useState(false)
   const [start, setStart] = useState('')
   const [end, setEnd] = useState('')
@@ -123,7 +126,6 @@ function ProjectHeader({ row, health, onSaved }) {
     }
   }
 
-  const mine = isMine(row.project_co, localName)
   const days = row.days_to_end
 
   return (
@@ -137,11 +139,12 @@ function ProjectHeader({ row, health, onSaved }) {
             <ProjectStatusBadge status={row.project_status} />
           </div>
         </div>
-        {!editing && (
+        {!editing && canEdit && (
           <button type="button" className="btn btn-ghost btn-sm" onClick={startEdit}>
             <Icon name="pen" size={13} /> แก้ไขสัญญา / Project Co / สถานะ
           </button>
         )}
+        {!canEdit && <ReadOnlyBadge />}
       </div>
 
       {health.reasons.length > 0 && (
@@ -150,7 +153,7 @@ function ProjectHeader({ row, health, onSaved }) {
         </div>
       )}
 
-      {editing ? (
+      {editing && canEdit ? (
         <form className="trk-edit" onSubmit={save} noValidate>
           <div className="trk-form-row">
             <div className="field" style={{ flex: '1 1 100%' }}>
@@ -177,9 +180,9 @@ function ProjectHeader({ row, health, onSaved }) {
             <div className="field" style={{ flex: '2 1 240px' }}>
               <label htmlFor="trk-co">Project Co (ชื่อที่แสดง)</label>
               <input id="trk-co" value={co} onChange={(e) => setCo(e.target.value)} placeholder="ชื่อ-สกุล หรือรหัสพนักงาน (หลายคนคั่นด้วย ,)" />
-              {localName && (
-                <button type="button" className="trk-link-btn" onClick={() => setCo(localName)}>
-                  ใช้ชื่อของฉัน ("{localName}")
+              {myName && (
+                <button type="button" className="trk-link-btn" onClick={() => setCo(myName)}>
+                  ใช้ชื่อของฉัน ("{myName}")
                 </button>
               )}
             </div>
@@ -222,7 +225,7 @@ function ProjectHeader({ row, health, onSaved }) {
           <div>
             <span className="muted small">Project Co</span>
             <div>
-              <CoContact co={row.project_co} phone={row.project_co_phone} /> {mine && <ToneBadge tone="info">คุณ</ToneBadge>}
+              <CoContact co={row.project_co} phone={row.project_co_phone} />
             </div>
           </div>
           <div>
@@ -259,6 +262,8 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProj
   const [history, setHistory] = useState([])
   const [installments, setInstallments] = useState([])
   const toast = useToast()
+  const { canEditProject } = useAuth()
+  const canEdit = canEditProject(projectId)
 
   const loadAll = async () => {
     setStatus('loading')
@@ -335,16 +340,18 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProj
         <ProjectHeader
           row={row}
           health={health}
+          canEdit={canEdit}
           onSaved={async () => {
             await refreshRow()
             onProjectChanged?.() // let the app reload home lists / drawer data
           }}
         />
         <div className="trk-detail-grid">
-          <TrackingProgress row={row} history={history} onSaved={async () => { await Promise.all([refreshRow(), refreshHistory()]) }} />
+          <TrackingProgress row={row} history={history} canEdit={canEdit} onSaved={async () => { await Promise.all([refreshRow(), refreshHistory()]) }} />
           <TrackingInstallments
             installments={installments}
             projectId={projectId}
+            canEdit={canEdit}
             onChanged={refreshInstallments}
             onOpenUpload={onOpenUpload}
           />

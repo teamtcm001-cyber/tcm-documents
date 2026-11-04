@@ -4,6 +4,9 @@
 // Endpoint: POST /api/chat
 // Body: { query, context, history?, grounding? }
 // Returns: { intent, reply, files, projectCode, truncated? }   (fixed field whitelist)
+// Auth: requires "Authorization: Bearer <supabase access token>" of an active user
+//       (401 { error: 'unauthorized' } / 403 { error: 'account_disabled' } otherwise).
+import { ApiError, rateLimit, requireUser, sendError } from './_auth.js'
 
 function pickFilesForPrompt(files, projects, query, max) {
   if (files.length <= max) return files
@@ -400,12 +403,25 @@ const looksLikeJson = (t) => /^\s*[[{]/.test(t) || /```/.test(t) || /"(?:reply|i
 const MARKER_RE = /[ \t]?[[【]\s*P\d{1,3}(?:\s*[,，、;]\s*P\d{1,3})*\s*[\]】]/g
 const stripMarkers = (s) => s.replace(MARKER_RE, '')
 
+const CHAT_RATE_MAX = 30
+const CHAT_RATE_WINDOW_MS = 10 * 60 * 1000
+
 const FALLBACK_RESPONSE = { intent: 'answer', reply: '__USE_LOCAL__', fallback: true }
 
 export default async function handler(req, res) {
   // Same-origin only: no CORS headers. Caller must be a logged-in, active user.
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
+  }
+  try {
+    const { user } = await requireUser(req)
+    // Per-user cap (best-effort, per warm instance): protects the Anthropic budget from a
+    // runaway client or a stolen session. Same limiter as /api/drive-token.
+    if (!rateLimit(`chat:${user.id}`, CHAT_RATE_MAX, CHAT_RATE_WINDOW_MS)) {
+      throw new ApiError(429, 'rate_limited')
+    }
+  } catch (authErr) {
+    return sendError(res, authErr)
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY
@@ -580,7 +596,15 @@ ${inventoryBlock}
     }
 
     if (!response.ok) {
-      console.error('Anthropic API error:', response.status, String(rawBody).slice(0, 300))
+      // Status + Anthropic's error TYPE only; the body is never logged (could echo prompt text).
+      let errType = 'unknown'
+      try {
+        const t = JSON.parse(String(rawBody))?.error?.type
+        if (typeof t === 'string') errType = t.slice(0, 60)
+      } catch {
+        /* non-JSON error body */
+      }
+      console.error('Anthropic API error:', response.status, errType)
       return res.status(200).json({
         intent: 'answer',
         reply: '__USE_LOCAL__',
@@ -648,7 +672,7 @@ ${inventoryBlock}
 
     return respond({ intent, reply: parsed.reply, files: outFiles, projectCode })
   } catch (err) {
-    console.error('Chat handler error:', err?.name === 'AbortError' ? 'upstream timeout' : err)
+    console.error('Chat handler error:', err?.name === 'AbortError' ? 'upstream timeout' : err?.name || 'Error')
     return res.status(200).json({
       intent: 'answer',
       reply: '__USE_LOCAL__',

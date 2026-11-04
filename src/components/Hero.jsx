@@ -1,7 +1,7 @@
 import Icon from './Icon.jsx'
 import { fmtDate, fmtSize, TYPE_LABEL, TYPE_COLOR } from '../utils/format.js'
 
-export default function Hero({ stats, recentFiles, projects, onUpload, onAsk }) {
+export default function Hero({ stats, recentFiles, projects, canUpload = true, onUpload, onAsk }) {
   return (
     <section className="hero">
       <div className="container">
@@ -22,10 +22,12 @@ export default function Hero({ stats, recentFiles, projects, onUpload, onAsk }) 
               แค่พิมพ์คำสั่ง ระบบดึงไฟล์ที่ถูกต้องให้คุณทันที
             </p>
             <div className="hero-actions">
-              <button className="btn btn-primary" onClick={onUpload}>
-                <Icon name="upload" size={16} /> เริ่มอัปโหลดเอกสาร
-              </button>
-              <button className="btn btn-secondary" onClick={onAsk}>
+              {canUpload && (
+                <button className="btn btn-primary" onClick={onUpload}>
+                  <Icon name="upload" size={16} /> เริ่มอัปโหลดเอกสาร
+                </button>
+              )}
+              <button className={canUpload ? 'btn btn-secondary' : 'btn btn-primary'} onClick={onAsk}>
                 <Icon name="sparkles" size={16} /> ลองถาม AI
               </button>
             </div>
@@ -53,14 +55,14 @@ export default function Hero({ stats, recentFiles, projects, onUpload, onAsk }) 
               </div>
             </div>
           </div>
-          <HeroPreview recentFiles={recentFiles} projects={projects} />
+          <HeroPreview recentFiles={recentFiles} projects={projects} canUpload={canUpload} />
         </div>
       </div>
     </section>
   )
 }
 
-function HeroPreview({ recentFiles = [], projects = [] }) {
+function HeroPreview({ recentFiles = [], projects = [], canUpload = true }) {
   const projectMap = {}
   projects.forEach((p) => (projectMap[p.id] = p))
 
@@ -81,7 +83,7 @@ function HeroPreview({ recentFiles = [], projects = [] }) {
             <Icon name="folder" size={36} />
             <div style={{ marginTop: 12, fontSize: 14 }}>ยังไม่มีเอกสารในระบบ</div>
             <div style={{ marginTop: 4, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>
-              อัปโหลดเอกสารแรกเพื่อเริ่มต้น
+              {canUpload ? 'อัปโหลดเอกสารแรกเพื่อเริ่มต้น' : 'เอกสารที่คุณมีสิทธิ์เข้าถึงจะแสดงที่นี่'}
             </div>
           </div>
         </div>

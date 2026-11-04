@@ -286,7 +286,7 @@ function TemplateModal({ projectId, onClose }) {
 }
 
 // ---------- checklist for one installment ----------
-export default function TrackingChecklist({ installment, projectId, onChanged, onOpenUpload }) {
+export default function TrackingChecklist({ installment, projectId, canEdit = false, onChanged, onOpenUpload }) {
   const toast = useToast()
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
@@ -370,9 +370,11 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
         ) : (
           !loading && <ToneBadge tone="mute">ยังไม่ตั้งเช็กลิสต์</ToneBadge>
         )}
-        <button type="button" className="trk-link-btn" style={{ marginLeft: 'auto' }} onClick={() => setTemplateOpen(true)}>
-          แม่แบบของโครงการ
-        </button>
+        {canEdit && (
+          <button type="button" className="trk-link-btn" style={{ marginLeft: 'auto' }} onClick={() => setTemplateOpen(true)}>
+            แม่แบบของโครงการ
+          </button>
+        )}
       </div>
 
       {loading ? (
@@ -386,6 +388,7 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
           {items.length === 0 ? (
             <div className="trk-empty">
               ยังไม่มีรายการเอกสารในงวดนี้
+              {canEdit && (
               <div style={{ marginTop: 8 }}>
                 <button
                   type="button"
@@ -405,6 +408,7 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
                   ใช้แม่แบบของโครงการ
                 </button>
               </div>
+              )}
             </div>
           ) : (
             <ul className="trk-docs">
@@ -439,6 +443,7 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
                         <div className={`trk-doc-none ${it.required ? 'req' : ''}`}>ยังไม่มีในระบบ</div>
                       )}
                     </div>
+                    {canEdit && (
                     <div className="trk-doc-actions">
                       <label className="trk-check" title="เอกสารจำเป็นต้องมีก่อนเบิก">
                         <input
@@ -485,12 +490,14 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
                         <Icon name="trash" size={15} />
                       </button>
                     </div>
+                    )}
                   </li>
                 )
               })}
             </ul>
           )}
 
+          {canEdit && (
           <form className="trk-add-row" onSubmit={addItem}>
             <input
               type="text"
@@ -506,10 +513,11 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
               <Icon name="plus" size={13} /> เพิ่มรายการ
             </button>
           </form>
+          )}
         </>
       )}
 
-      {picker && (
+      {picker && canEdit && (
         <FilePickerModal
           projectId={projectId}
           itemLabel={picker.label}
@@ -523,7 +531,7 @@ export default function TrackingChecklist({ installment, projectId, onChanged, o
           }}
         />
       )}
-      {templateOpen && <TemplateModal projectId={projectId} onClose={() => setTemplateOpen(false)} />}
+      {templateOpen && canEdit && <TemplateModal projectId={projectId} onClose={() => setTemplateOpen(false)} />}
       {preview && <PreviewModal file={preview} onClose={() => setPreview(null)} />}
     </div>
   )

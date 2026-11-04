@@ -1,22 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
 import Icon from './Icon.jsx'
 import { fetchTrackingOverview } from '../api/supabase.js'
-import { getLocalName } from '../utils/localIdentity.js'
+import { useAuth } from '../auth/AuthContext.jsx'
+import { NoProjectsNotice, ReadOnlyBadge } from './AccessBits.jsx'
 import {
-  computeHealth, HEALTH_ORDER, isMine, isStale, nextInstallmentLine, docsStateText, fmtThaiDate, todayTH,
+  computeHealth, HEALTH_ORDER, isStale, nextInstallmentLine, docsStateText, fmtThaiDate, todayTH,
 } from '../utils/tracking.js'
 import {
   HealthChip, ToneBadge, ProgressMeter, MeterLegend, NotInstalledNotice, ErrorNotice, PartialDataNotice, CriteriaPopover,
   CoContact, ProjectStatusBadge,
 } from './TrackingBits.jsx'
 
-function ProjectRow({ item, mineName, onOpen }) {
+function ProjectRow({ item, mine, readOnly, onOpen }) {
   const { row, health } = item
   const next = nextInstallmentLine(row)
   const docs = row.next_installment_id
     ? docsStateText(row.next_docs_state, row.next_required_docs_total, row.next_required_docs_attached)
     : null
-  const mine = isMine(row.project_co, mineName)
   const never = row.days_since_update == null
   const stale = isStale(row)
 
@@ -46,6 +46,7 @@ function ProjectRow({ item, mineName, onOpen }) {
               <Icon name="user" size={12} /> Project Co: <CoContact co={row.project_co} phone={row.project_co_phone} />
             </span>
             {mine && <ToneBadge tone="info">โปรเจกต์ของฉัน</ToneBadge>}
+            {readOnly && <ReadOnlyBadge />}
           </div>
         </div>
         <Icon name="arrow-r" size={16} style={{ color: 'var(--gray-400)', flexShrink: 0 }} />
@@ -116,6 +117,7 @@ const readHideClosed = () => {
 }
 
 export default function TrackingOverview({ onOpenProject }) {
+  const { isAdmin, isExec, isMember, myProjectIds, canEditProject } = useAuth()
   const [state, setState] = useState({ loading: true, rows: [], notInstalled: false, error: null, partial: false })
   const [onlyMine, setOnlyMine] = useState(false)
   const [onlyAction, setOnlyAction] = useState(false)
@@ -130,7 +132,6 @@ export default function TrackingOverview({ onOpenProject }) {
       /* private mode / storage blocked: the choice just won't persist */
     }
   }
-  const localName = getLocalName()
 
   const load = async () => {
     setState((s) => ({ ...s, loading: true }))
@@ -174,10 +175,14 @@ export default function TrackingOverview({ onOpenProject }) {
     return s
   }, [scoped])
 
-  const myCount = scoped.filter(({ row }) => isMine(row.project_co, localName)).length
+  // "โปรเจกต์ของฉัน" = projects the person is a member of (project_members). A plain member only sees
+  // their own projects anyway, so the filter is offered only where it separates something (admin/exec).
+  const isMineRow = (row) => myProjectIds.has(row.project_id)
+  const myCount = scoped.filter(({ row }) => isMineRow(row)).length
+  const showMineFilter = !isMember && myProjectIds.size > 0
 
   const visible = scoped
-    .filter(({ row }) => !onlyMine || isMine(row.project_co, localName))
+    .filter(({ row }) => !onlyMine || isMineRow(row))
     .filter(({ health }) => !onlyAction || health.level !== 'green')
     .sort(
       (a, b) =>
@@ -231,14 +236,16 @@ export default function TrackingOverview({ onOpenProject }) {
             </div>
 
             <div className="trk-toolbar">
-              <button
-                className={`filter-chip ${onlyMine ? 'on' : ''}`}
-                aria-pressed={onlyMine}
-                onClick={() => setOnlyMine((v) => !v)}
-                title="จับคู่ชื่อที่คุณกรอกตอนเข้าระบบ กับช่อง Project Co ของโครงการ (เป็นเพียงตัวกรอง ไม่ใช่การจำกัดสิทธิ์)"
-              >
-                <Icon name="user" size={12} /> โปรเจกต์ของฉัน ({myCount})
-              </button>
+              {showMineFilter && (
+                <button
+                  className={`filter-chip ${onlyMine ? 'on' : ''}`}
+                  aria-pressed={onlyMine}
+                  onClick={() => setOnlyMine((v) => !v)}
+                  title="แสดงเฉพาะโครงการที่คุณถูกกำหนดเป็นสมาชิก"
+                >
+                  <Icon name="user" size={12} /> โปรเจกต์ของฉัน ({myCount})
+                </button>
+              )}
               <button
                 className={`filter-chip ${onlyAction ? 'on' : ''}`}
                 aria-pressed={onlyAction}
@@ -257,33 +264,25 @@ export default function TrackingOverview({ onOpenProject }) {
                 </button>
               )}
               <CriteriaPopover />
-              <span className="muted small trk-toolbar-note">
-                ใครก็แก้ได้ทุกโครงการ — "โปรเจกต์ของฉัน" เป็นเพียงตัวกรองตามชื่อ ไม่ใช่การจำกัดสิทธิ์
-              </span>
+              {!isAdmin && (
+                <span className="muted small trk-toolbar-note">
+                  {isExec
+                    ? 'ผู้บริหาร: เห็นทุกโครงการ (อ่านอย่างเดียว)'
+                    : 'แสดงเฉพาะโครงการที่คุณได้รับสิทธิ์ — โครงการที่มีป้าย "อ่านอย่างเดียว" แก้ไขไม่ได้'}
+                </span>
+              )}
             </div>
 
             {items.length === 0 ? (
-              <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--gray-500)' }}>
-                <Icon name="folder" size={32} />
-                <div style={{ marginTop: 8 }}>ยังไม่มีโครงการในระบบ</div>
-              </div>
+              <NoProjectsNotice />
             ) : visible.length === 0 ? (
               <div className="card" style={{ padding: 32, textAlign: 'center', color: 'var(--gray-500)' }}>
-                {onlyMine && myCount === 0 ? (
-                  <>
-                    ยังไม่มีโครงการที่ระบุ Project Co เป็นชื่อของคุณ ("{localName}")
-                    <div className="small" style={{ marginTop: 6 }}>
-                      เปิดโครงการแล้วกด "แก้ไข" ที่หัวหน้ารายละเอียดเพื่อใส่ชื่อ Project Co
-                    </div>
-                  </>
-                ) : (
-                  'ไม่มีโครงการที่ตรงกับตัวกรอง'
-                )}
+                ไม่มีโครงการที่ตรงกับตัวกรอง
               </div>
             ) : (
               <div className="trk-list">
                 {visible.map((item) => (
-                  <ProjectRow key={item.row.project_id} item={item} mineName={localName} onOpen={onOpenProject} />
+                  <ProjectRow key={item.row.project_id} item={item} mine={!isMember && isMineRow(item.row)} readOnly={isMember && !canEditProject(item.row.project_id)} onOpen={onOpenProject} />
                 ))}
               </div>
             )}

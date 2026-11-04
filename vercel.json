@@ -5,6 +5,7 @@
   "framework": "vite",
   "outputDirectory": "dist",
   "functions": {
-    "api/chat.js": { "maxDuration": 60 }
+    "api/chat.js": { "maxDuration": 60 },
+    "api/drive-file.js": { "maxDuration": 60 }
   }
 }

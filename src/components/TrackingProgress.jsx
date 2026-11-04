@@ -2,9 +2,8 @@ import { useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import { addProgressUpdate, updateProgressUpdate, deleteProgressUpdate } from '../api/supabase.js'
-import { getLocalName } from '../utils/localIdentity.js'
 import {
-  todayTH, fmtThaiDate, fmtThaiDateTime, daysBetween, elapsedPctAt, dailyProgressSeries, isStale, isIsoDate, isSaneDate, isMine,
+  todayTH, fmtThaiDate, fmtThaiDateTime, daysBetween, elapsedPctAt, dailyProgressSeries, isStale, isIsoDate, isSaneDate,
   BEHIND_POINTS, INSANE_DATE_MESSAGE,
 } from '../utils/tracking.js'
 import { ProgressMeter, MeterLegend, ToneBadge } from './TrackingBits.jsx'
@@ -111,7 +110,7 @@ function validateProgressFields(percent, asOf, today) {
 }
 
 // ---------- one history row (view / inline edit) ----------
-function HistoryRow({ h, delta, today, onChanged }) {
+function HistoryRow({ h, delta, today, canEdit, onChanged }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
   const [percent, setPercent] = useState(String(h.percent_complete))
@@ -168,7 +167,7 @@ function HistoryRow({ h, delta, today, onChanged }) {
     }
   }
 
-  if (editing) {
+  if (editing && canEdit) {
     return (
       <tr className="trk-row-edit">
         <td colSpan={6}>
@@ -225,22 +224,24 @@ function HistoryRow({ h, delta, today, onChanged }) {
       </td>
       <td>{h.note || '-'}</td>
       <td className="muted">{fmtThaiDateTime(h.created_at)}</td>
-      <td>
-        <div className="trk-row-actions">
-          <button type="button" className="trk-link-btn" onClick={startEdit} disabled={busy} aria-label={`แก้ไขรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)}`}>
-            <Icon name="pen" size={13} /> แก้ไข
-          </button>
-          <button type="button" className="trk-link-btn danger" onClick={remove} disabled={busy} aria-label={`ลบรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)}`}>
-            <Icon name="trash" size={13} /> ลบ
-          </button>
-        </div>
-      </td>
+      {canEdit && (
+        <td>
+          <div className="trk-row-actions">
+            <button type="button" className="trk-link-btn" onClick={startEdit} disabled={busy} aria-label={`แก้ไขรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)}`}>
+              <Icon name="pen" size={13} /> แก้ไข
+            </button>
+            <button type="button" className="trk-link-btn danger" onClick={remove} disabled={busy} aria-label={`ลบรายการ ${h.percent_complete}% ณ ${fmtThaiDate(h.as_of)}`}>
+              <Icon name="trash" size={13} /> ลบ
+            </button>
+          </div>
+        </td>
+      )}
     </tr>
   )
 }
 
 // ---------- panel ----------
-export default function TrackingProgress({ row, history, onSaved }) {
+export default function TrackingProgress({ row, history, canEdit = false, onSaved }) {
   const toast = useToast()
   const today = todayTH()
   const [percent, setPercent] = useState(String(row.percent_complete ?? 0))
@@ -250,8 +251,6 @@ export default function TrackingProgress({ row, history, onSaved }) {
   const [error, setError] = useState('')
   const [showAll, setShowAll] = useState(false)
 
-  const localName = getLocalName()
-  const otherCo = row.project_co && !isMine(row.project_co, localName)
   const never = row.percent_complete == null
   const gap = !never && row.time_elapsed_pct != null ? row.time_elapsed_pct - row.percent_complete : null
   const sameDay = history.find((h) => h.as_of === asOf)
@@ -328,6 +327,7 @@ export default function TrackingProgress({ row, history, onSaved }) {
         </div>
       </div>
 
+      {canEdit && (
       <form className="trk-form" onSubmit={submit} noValidate>
         <div className="trk-form-title">อัปเดต %</div>
         <div className="trk-form-row">
@@ -378,11 +378,6 @@ export default function TrackingProgress({ row, history, onSaved }) {
             ส่วนรายการเดิมยังเก็บในประวัติ
           </div>
         )}
-        {otherCo && (
-          <div className="trk-hint">
-            โปรเจกต์นี้ระบุ Project Co เป็น "{row.project_co}" — ระบบไม่ได้จำกัดสิทธิ์ตามชื่อ และไม่บันทึกว่าใครเป็นผู้อัปเดต
-          </div>
-        )}
         {error && (
           <div className="auth-msg err" role="alert">
             {error}
@@ -392,6 +387,7 @@ export default function TrackingProgress({ row, history, onSaved }) {
           <Icon name="check" size={14} /> {saving ? 'กำลังบันทึก...' : 'บันทึก %'}
         </button>
       </form>
+      )}
 
       <div className="trk-sub-h">แนวโน้ม (เส้นประ = เวลาที่ผ่านไปตามสัญญา)</div>
       <ProgressTrend history={history} start={row.start_date} end={row.end_date} />
@@ -410,14 +406,14 @@ export default function TrackingProgress({ row, history, onSaved }) {
                   <th>เปลี่ยน</th>
                   <th>หมายเหตุ</th>
                   <th>บันทึกเมื่อ</th>
-                  <th>จัดการ</th>
+                  {canEdit && <th>จัดการ</th>}
                 </tr>
               </thead>
               <tbody>
                 {shown.map((h, i) => {
                   const prev = history[i + 1]
                   const d = prev ? h.percent_complete - prev.percent_complete : null
-                  return <HistoryRow key={h.id} h={h} delta={d} today={today} onChanged={async () => { await onSaved?.() }} />
+                  return <HistoryRow key={h.id} h={h} delta={d} today={today} canEdit={canEdit} onChanged={async () => { await onSaved?.() }} />
                 })}
               </tbody>
             </table>
