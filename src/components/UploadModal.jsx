@@ -183,7 +183,8 @@ export default function UploadModal({ onClose, onUploaded }) {
               <Icon name="upload" size={32} />
             </div>
             <div className="t">ลากไฟล์มาวางที่นี่ หรือคลิกเลือก</div>
-            <div className="s">รองรับ PDF, Word, Excel, JPG, PNG</div>
+            <div className="s">รองรับ PDF, Word, Excel, JPG, PNG, ZIP</div>
+            <div className="s" style={{ marginTop: 2 }}>ไฟล์ ZIP เก็บไว้เป็นไฟล์และค้นหาจากชื่อได้ (ระบบยังไม่อ่านเนื้อหาข้างใน)</div>
           </label>
 
           {items.length > 0 && (
