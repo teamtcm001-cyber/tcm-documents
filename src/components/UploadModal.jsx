@@ -10,6 +10,12 @@ import { extractText } from '../utils/textExtract.js'
 const STOP_CODES = new Set([
   'unauthorized', 'forbidden', 'no_access', 'rate_limited', 'auth_unavailable', 'password_change_required', 'account_disabled', 'unsure_outcome',
 ])
+// NOT in the list on purpose (they only concern the one file, the next one may well work): 'file_too_large',
+// 'upstream_error' (Google Drive hiccup), 'network', 'drive'.
+
+// The bar: 0-30 reading the file, 30-70 text extraction, 70-95 the real byte upload to Google Drive, 100 saved.
+const UPLOAD_FROM = 70
+const UPLOAD_SPAN = 25
 
 export default function UploadModal({ onClose, onUploaded }) {
   const { canEditProject } = useAuth()
@@ -43,18 +49,6 @@ export default function UploadModal({ onClose, onUploaded }) {
       done: false,
     }))
     setItems((prev) => [...prev, ...arr])
-    // simulate progress animation before real upload
-    arr.forEach((it) => {
-      let p = 0
-      const tk = setInterval(() => {
-        p += Math.random() * 25 + 15
-        if (p >= 95) {
-          p = 95
-          clearInterval(tk)
-        }
-        setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: p } : x)))
-      }, 220)
-    })
   }
 
   const onDrop = (e) => {
@@ -81,6 +75,13 @@ export default function UploadModal({ onClose, onUploaded }) {
     let fail = 0
     for (const it of items) {
       try {
+        // An empty file cannot be uploaded (the server refuses size 0): say so plainly, before any extraction/upload.
+        // Per-file and non-stop - the next files are unaffected.
+        if (it.file.size === 0) {
+          const e = new Error('ไฟล์ว่าง (0 ไบต์) อัปโหลดไม่ได้')
+          e.code = 'empty_file'
+          throw e
+        }
         // Extract text content for searching (PDF/DOCX/XLSX/TXT)
         let contentText = null
         try {
@@ -94,7 +95,14 @@ export default function UploadModal({ onClose, onUploaded }) {
         }
         setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 70 } : x)))
 
-        const saved = await uploadFile(projId, it.file, it.type, null, contentText)
+        let lastPct = -1
+        const onProgress = (pct) => {
+          const p = UPLOAD_FROM + Math.round((Math.max(0, Math.min(100, pct)) * UPLOAD_SPAN) / 100)
+          if (p === lastPct) return
+          lastPct = p
+          setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: p } : x)))
+        }
+        const saved = await uploadFile(projId, it.file, it.type, null, contentText, onProgress)
         // saved, but the "latest version" bookkeeping could not be completed: warn, do not fail the upload
         if (saved?._warning) toast(`${it.name}: ${saved._warning}`, 'err')
         try {
@@ -104,6 +112,7 @@ export default function UploadModal({ onClose, onUploaded }) {
         ok++
       } catch (err) {
         fail++
+        setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 0 } : x)))
         // 'unsure_outcome' is not a known failure: the message itself tells the person what to check
         toast(err?.code === 'unsure_outcome' ? `${it.name}: ${err.message}` : `อัปโหลด ${it.name} ไม่สำเร็จ: ${err.message}`, 'err')
         // the next files would hit the same wall: stop and tell the person once
@@ -122,11 +131,11 @@ export default function UploadModal({ onClose, onUploaded }) {
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={() => { if (!submitting) onClose() }}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>อัปโหลดเอกสารใหม่</h3>
-          <button className="icon-btn" onClick={onClose}>
+          <button className="icon-btn" onClick={onClose} disabled={submitting} aria-label="ปิด">
             <Icon name="close" size={18} />
           </button>
         </div>
@@ -230,6 +239,7 @@ export default function UploadModal({ onClose, onUploaded }) {
           )}
         </div>
         <div className="modal-foot">
+          {submitting && <span className="muted small" style={{ marginRight: 'auto' }}>กำลังอัปโหลด อย่าปิดหน้านี้</span>}
           <button className="btn btn-ghost" onClick={onClose} disabled={submitting}>
             ยกเลิก
           </button>

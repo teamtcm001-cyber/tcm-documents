@@ -9,6 +9,7 @@
 //   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN /
 //   GOOGLE_DRIVE_FOLDER_ID     Google Drive storage (existing)
 //   ANTHROPIC_API_KEY          AI chat (existing, optional)
+//   APP_ORIGINS                optional extra browser origins allowed to start uploads (drive-upload-session)
 //
 // Nothing in here logs tokens, passwords or document content (the only log lines are error
 // class names, HTTP status numbers and environment-variable NAMES).

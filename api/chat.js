@@ -456,7 +456,7 @@ export default async function handler(req, res) {
   try {
     const { user } = await requireUser(req)
     // Per-user cap (best-effort, per warm instance): protects the Anthropic budget from a
-    // runaway client or a stolen session. Same limiter as /api/drive-token.
+    // runaway client or a stolen session. Same limiter as /api/drive-upload-session.
     if (!rateLimit(`chat:${user.id}`, CHAT_RATE_MAX, CHAT_RATE_WINDOW_MS)) {
       throw new ApiError(429, 'rate_limited')
     }

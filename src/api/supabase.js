@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { uploadToDrive, discardDriveUpload, clearDriveTokenCache } from '../utils/googleDrive.js';
+import { uploadToDrive, discardDriveUpload } from '../utils/googleDrive.js';
 import {
   todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, ALL_STATUSES, CLEARS_BILLED_DATE,
   phoneError, normalizePhones, PROJECT_STATUSES,
@@ -81,13 +81,11 @@ export async function signIn(email, password) {
     password: String(password || ''),
   });
   if (error) throw describeAuthError(error, 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
-  clearDriveTokenCache();
   return data;
 }
 
 // 'local' = end THIS browser's session only (the default would sign the person out everywhere).
 export async function signOut() {
-  clearDriveTokenCache();
   try {
     await supabase.auth.signOut({ scope: 'local' });
   } catch (err) {
@@ -180,7 +178,6 @@ export function subscribeAuthProblem(cb) {
   return () => authProblemListeners.delete(cb);
 }
 function reportAuthProblem(kind) {
-  if (kind === 'expired' || kind === 'denied') clearDriveTokenCache();
   authProblemListeners.forEach((cb) => {
     try {
       cb(kind);
@@ -553,16 +550,19 @@ export function sanitizePgText(text) {
     .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
 }
 
-export async function uploadFile(projectId, file, fileType, uploaderName = null, contentText = null) {
+// onProgress(percent 0..100) reports the byte upload to Google Drive (real progress, see uploadToDrive).
+export async function uploadFile(projectId, file, fileType, uploaderName = null, contentText = null, onProgress = null) {
   const user = await getCurrentUser();
   contentText = sanitizePgText(contentText);
 
-  // 1. Upload to Google Drive — storage_path stores the Drive file id.
-  // /api/drive-token is per project (role gate for THAT project); a refusal means our idea of the
-  // person's access is stale, so the app re-reads memberships.
+  // 1. Upload to Google Drive — storage_path stores the Drive file id. The upload goes through a resumable session
+  // the SERVER created (/api/drive-upload-session, role gate for THAT project); the browser never holds a Google
+  // credential. A refusal means our idea of the person's access is stale, so the app re-reads memberships.
+  // `ticket` proves the session to /api/drive-upload-discard (orphan cleanup below).
   let driveFileId;
+  let ticket;
   try {
-    driveFileId = await uploadToDrive(file, authFetch, projectId);
+    ({ id: driveFileId, ticket } = await uploadToDrive(file, authFetch, projectId, onProgress));
   } catch (err) {
     if (err?.code === 'forbidden') reportAuthProblem('denied');
     throw err;
@@ -602,7 +602,8 @@ export async function uploadFile(projectId, file, fileType, uploaderName = null,
     //  * unknown outcome (network / timeout / 5xx): the INSERT may have committed -> never delete; look the row up
     //    by storage_path: found = success, not found = tell the person to check before uploading again;
     //  * definite rejection (4xx: RLS / permission, check or not-null violation, JWT): nothing was stored ->
-    //    delete the Drive object, but only after re-selecting by storage_path proves no row points at it;
+    //    ask the server to delete the Drive object (discard ticket), but only after re-selecting by storage_path
+    //    proves no row points at it; the server re-checks that too and answers 409 in_use if a row does exist;
     //  * anything else: keep the object (never guess).
     const err = inserted.error;
     if (String(err.code || '') === '23505') {
@@ -618,9 +619,17 @@ export async function uploadFile(projectId, file, fileType, uploaderName = null,
     } else {
       if (isDefiniteRejection(inserted)) {
         const found = await findRowByStoragePath(driveFileId);
-        if (!found.error && !found.row) await discardDriveUpload(projectId, driveFileId);
+        if (!found.error && !found.row) {
+          const outcome = await discardDriveUpload(authFetch, ticket);
+          if (outcome === 'in_use') {
+            // the server sees a files row for this Drive id after all: the upload IS saved, nothing was deleted
+            const again = await findRowByStoragePath(driveFileId);
+            if (again.row) row = again.row;
+            else throw new AppError('ไม่แน่ใจว่าบันทึกสำเร็จ — ตรวจสอบรายการเอกสารก่อนอัปโหลดซ้ำ', 'unsure_outcome');
+          }
+        }
       }
-      throw writeError(err);
+      if (!row) throw writeError(err);
     }
   }
   if (!row) {
