@@ -47,10 +47,14 @@ const PROFILE_FIELDS = 'id,email,full_name,role,active,must_change_password,crea
 function makeSvc() {
   const { url } = getSupabaseEnv()
   const { SUPABASE_SERVICE_ROLE_KEY: key } = requireEnv(['SUPABASE_SERVICE_ROLE_KEY'])
+  // Legacy service_role keys are JWTs: send them as apikey AND Bearer. The new "secret" keys
+  // (sb_secret_...) are NOT JWTs: Supabase wants them in the apikey header only and rejects
+  // them as a Bearer token. The legacy keys are being retired (announced for early 2027).
+  const isSecretKey = key.startsWith('sb_secret_')
   return async function svc(path, init = {}) {
     const headers = {
       apikey: key,
-      Authorization: `Bearer ${key}`,
+      ...(isSecretKey ? {} : { Authorization: `Bearer ${key}` }),
       Accept: 'application/json',
       ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(init.headers || {}),
