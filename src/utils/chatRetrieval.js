@@ -11,13 +11,14 @@
 //   * MONEY: the tracking data has no money fields and none are added. Amounts that appear
 //     INSIDE a document passage (contract text, minutes) are sent as written - they are the
 //     document's own content and are not scrubbed.
-//   * bounded size (<= 6 briefs, <= 14 passages, <= ~40k passage chars, each <= 4000),
+//   * bounded size (<= 6 briefs for named projects, <= 12 for portfolio questions, <= 14 passages, <= ~40k passage chars, each <= 4000),
 //   * the context files are never mutated.
 
 import { computeHealth, HEALTH_ORDER, STATUS_LABEL, OPEN_STATUSES, splitCoNames, fmtThaiDate } from './tracking.js'
 
 export const GROUNDING_LIMITS = {
-  BRIEFS: 6,
+  BRIEFS: 6, // named projects ("summarize project X")
+  PORTFOLIO_BRIEFS: 12, // "which projects ..." questions: cover every project of a normal portfolio
   PASSAGES: 14,
   PASSAGE_CHARS: 4000,
   TOTAL_PASSAGE_CHARS: 40000,
@@ -792,7 +793,7 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
       missingIds = new Set()
       for (const [id, res] of instById) if (res.ok && res.data.some(hasMissingDocsRaw)) missingIds.add(id)
     }
-    const picked = selectBriefRows(rows, { docsFocus: plan.docsFocus, missingIds })
+    const picked = selectBriefRows(rows, { limit: GROUNDING_LIMITS.PORTFOLIO_BRIEFS, docsFocus: plan.docsFocus, missingIds })
     briefs = await Promise.all(
       picked.map(async (row) => {
         const id = String(row.project_id)
@@ -802,7 +803,7 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
       })
     )
   }
-  briefs = briefs.slice(0, GROUNDING_LIMITS.BRIEFS)
+  briefs = briefs.slice(0, plan.projects.length ? GROUNDING_LIMITS.BRIEFS : GROUNDING_LIMITS.PORTFOLIO_BRIEFS)
   if (projectsTotal !== null) projectsShown = briefs.length
 
   // --- passages ---

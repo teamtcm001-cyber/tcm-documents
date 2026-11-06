@@ -33,7 +33,7 @@ function pickFilesForPrompt(files, projects, query, max) {
 // Everything in `grounding` is untrusted input: validate, coerce, cap.
 // ---------------------------------------------------------------------------
 const LIMITS = {
-  BRIEFS: 6,
+  BRIEFS: 12, // matches the client's portfolio cap; BRIEF_BUDGET below still bounds the total size
   PASSAGES: 14,
   INSTALLMENTS: 60,
   FILE_LIST: 30,
