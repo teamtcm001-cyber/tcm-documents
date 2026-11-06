@@ -764,6 +764,7 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
   let trackingFailed = false
   let projectsTotal = null
   let projectsShown = null
+  let docsScan = null
   const wantBriefs = plan.projects.length > 0 || plan.allProjects
   const overview = wantBriefs && deps.getOverview ? await safe(deps.getOverview) : null
   const rows = Array.isArray(overview?.data) ? overview.data : null
@@ -791,7 +792,33 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
       const readable = rows.filter((r) => (r.installments_total || 0) > 0).slice(0, MAX_PORTFOLIO_INSTALLMENT_READS)
       await Promise.all(readable.map(async (r) => instById.set(String(r.project_id), await fetchInst(r.project_id))))
       missingIds = new Set()
-      for (const [id, res] of instById) if (res.ok && res.data.some(hasMissingDocsRaw)) missingIds.add(id)
+      // A deterministic answer to "which projects miss billing documents", computed from the raw
+      // installments of EVERY readable project (not from the capped briefs below). The model is
+      // told to state this first, instead of inferring it from many briefs.
+      let installmentsMissing = 0
+      let projectsUnreadable = 0
+      const missingProjects = []
+      for (const [id, res] of instById) {
+        if (!res.ok) { projectsUnreadable++; continue }
+        const n = res.data.filter(hasMissingDocsRaw).length
+        if (n > 0) {
+          missingIds.add(id)
+          installmentsMissing += n
+          const row = rows.find((r) => String(r.project_id) === id)
+          missingProjects.push(String(row?.project_code || row?.project_name || id).slice(0, 50))
+        }
+      }
+      const withInstallments = rows.filter((r) => (r.installments_total || 0) > 0).length
+      docsScan = {
+        projectsTotal: rows.length,
+        projectsChecked: instById.size - projectsUnreadable,
+        projectsWithoutInstallments: rows.length - withInstallments,
+        projectsUnreadable,
+        projectsNotRead: Math.max(0, withInstallments - readable.length),
+        projectsWithMissing: missingIds.size,
+        installmentsMissing,
+        missingProjects: missingProjects.slice(0, GROUNDING_LIMITS.PORTFOLIO_BRIEFS),
+      }
     }
     const picked = selectBriefRows(rows, { limit: GROUNDING_LIMITS.PORTFOLIO_BRIEFS, docsFocus: plan.docsFocus, missingIds })
     briefs = await Promise.all(
@@ -845,6 +872,7 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
     grounding.projectsShown = projectsShown
   }
   if (coverage) grounding.passageCoverage = coverage
+  if (docsScan) grounding.docsScan = docsScan
   return {
     ...base,
     grounding,
