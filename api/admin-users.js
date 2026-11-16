@@ -23,6 +23,13 @@
 // adoptExisting:true gives that SAME auth user (id kept, so uploader_id/created_by stay valid) a new
 // temporary password and a profile. An existing auth user is never deleted.
 //
+// create (also with adoptExisting) accepts an optional initialPassword (the admin chooses the first
+// password, e.g. an employee id). The account is treated exactly like one with a generated password:
+// must_change_password=true + begin/set_pw_marker flow, so the person must still change it at first
+// login. The supplied password is NEVER echoed ({ ok, user, passwordProvided:true, audit:true }), never
+// logged and never written to the audit row (only passwordProvided:true). We enforce no minimum length
+// (Supabase's own policy applies; a GoTrue 422 weak_password becomes 400 weak_password).
+//
 // Temporary passwords are returned ONCE in the response of create / resetPassword and are
 // never logged or stored (only Supabase Auth keeps its hash).
 import { randomInt } from 'node:crypto'
@@ -116,6 +123,22 @@ function vName(v, { required = false } = {}) {
   if (n.length > 120) throw new ApiError(400, 'invalid_input', 'ชื่อยาวเกินไป (สูงสุด 120 ตัวอักษร)')
   if (required && !n) throw new ApiError(400, 'invalid_input', 'กรุณากรอกชื่อ')
   return n
+}
+
+// Optional admin-chosen first password. undefined = absent (generated password). Anything else
+// must be a string of 1..72 UTF-8 bytes (bcrypt ignores the rest), well-formed Unicode, with no
+// control characters and not whitespace only. No minimum length and no content rules on purpose
+// (employee-id style passwords are wanted; Supabase's configured policy decides). Messages never
+// contain the value.
+const BAD_PASSWORD = (m) => new ApiError(400, 'invalid_password', m)
+function vInitialPassword(v) {
+  if (v === undefined) return null
+  if (typeof v !== 'string') throw BAD_PASSWORD('รหัสผ่านเริ่มต้นต้องเป็นข้อความ')
+  if (v.length === 0) throw BAD_PASSWORD('กรุณากรอกรหัสผ่านเริ่มต้น')
+  if (!v.trim()) throw BAD_PASSWORD('รหัสผ่านเริ่มต้นต้องไม่ใช่ช่องว่างล้วน')
+  if (/\p{Cc}/u.test(v) || !v.isWellFormed()) throw BAD_PASSWORD('รหัสผ่านเริ่มต้นมีอักขระที่ไม่อนุญาต (อักขระควบคุม)')
+  if (Buffer.byteLength(v, 'utf8') > 72) throw BAD_PASSWORD('รหัสผ่านเริ่มต้นยาวเกินไป (สูงสุด 72 ไบต์ — ตัวอักษรไทยใช้ 3 ไบต์ต่อตัว)')
+  return v
 }
 
 function vUserId(v) {
@@ -319,6 +342,18 @@ const isEmailExists = (cr) => {
   return cr.status === 422 && (d.error_code === 'email_exists' || /already|exists|registered/i.test(String(d.msg || d.message || '')))
 }
 
+// GoTrue refuses a password below its configured minimum / strength rules with 422 weak_password.
+const isWeakPassword = (r) => {
+  const d = (r && r.data) || {}
+  return !!r && !r.ok && (r.status === 422 || r.status === 400) && d.error_code === 'weak_password'
+}
+const weakPasswordError = () =>
+  new ApiError(
+    400,
+    'weak_password',
+    'รหัสผ่านเริ่มต้นสั้นหรือง่ายเกินไปตามนโยบายของ Supabase — ปรับ Minimum password length ใน Supabase Auth หรือใช้รหัสสุ่ม'
+  )
+
 const createAuthUser = (svc, email, password, fullName) =>
   svc('/auth/v1/admin/users', {
     method: 'POST',
@@ -393,8 +428,15 @@ const ORPHAN_MESSAGE =
 // who signed up under the old whitelist). We never delete it: its id is referenced by
 // files.uploader_id / projects.created_by / activity.user_id (ON DELETE SET NULL would erase the
 // attribution). With adoptExisting:true the SAME auth user id is given a profile.
-async function adoptAuthUser(svc, admin, { id, email, role, fullName, password, previousSignIn }) {
-  const details = { target_email: email, role, adopted_existing_auth_user: true, auth_user_id: id, previous_last_sign_in_at: previousSignIn || null }
+async function adoptAuthUser(svc, admin, { id, email, role, fullName, password, provided, previousSignIn }) {
+  const details = {
+    target_email: email,
+    role,
+    adopted_existing_auth_user: true,
+    auth_user_id: id,
+    previous_last_sign_in_at: previousSignIn || null,
+    ...(provided ? { passwordProvided: true } : {}),
+  }
   // audit FIRST: nothing is touched when it cannot be written
   if (!(await audit(svc, admin, 'admin.create_user', id, { ...details, stage: 'initiated' }))) throw auditUnavailable()
   const failed = async (stage, err) => {
@@ -407,7 +449,14 @@ async function adoptAuthUser(svc, admin, { id, email, role, fullName, password, 
     method: 'PUT',
     body: JSON.stringify({ password, ban_duration: 'none', email_confirm: true, user_metadata: { full_name: fullName } }),
   })
-  if (!up.ok) await failed('set_password', new ApiError(502, 'upstream_error', 'ไม่สามารถตั้งรหัสผ่านให้บัญชีเดิมได้ ยังไม่ได้ให้สิทธิ์ใช้งาน'))
+  if (!up.ok) {
+    await failed(
+      'set_password',
+      provided && isWeakPassword(up)
+        ? weakPasswordError()
+        : new ApiError(502, 'upstream_error', 'ไม่สามารถตั้งรหัสผ่านให้บัญชีเดิมได้ ยังไม่ได้ให้สิทธิ์ใช้งาน')
+    )
+  }
 
   // 2) kill every old session BEFORE the profile exists (a holder of an old session must not be
   //    able to turn the account into a working one). Fail closed.
@@ -426,7 +475,9 @@ async function adoptAuthUser(svc, admin, { id, email, role, fullName, password, 
     await rollbackProfile(svc, id) // only the profile we just created; the auth user stays
     await failed('pw_marker', new ApiError(502, 'pw_marker_failed', 'ตั้งค่าการบังคับเปลี่ยนรหัสผ่านไม่สำเร็จ ยกเลิกการให้สิทธิ์แล้ว (บัญชีเข้าสู่ระบบเดิมยังอยู่) กรุณาลองใหม่'))
   }
-  return { user: pickProfile(profile), temporaryPassword: password, audit: true, adopted: true }
+  return provided
+    ? { user: pickProfile(profile), passwordProvided: true, audit: true, adopted: true }
+    : { user: pickProfile(profile), temporaryPassword: password, audit: true, adopted: true }
 }
 
 async function actCreate(svc, admin, body) {
@@ -434,10 +485,14 @@ async function actCreate(svc, admin, body) {
   const role = vRole(body.role)
   const fullName = vName(body.full_name) || email.split('@')[0]
   const adopt = body.adoptExisting === true
-  const password = generateTemporaryPassword()
+  // validated before anything is sent upstream; absent => a random temporary password as before
+  const supplied = vInitialPassword(body.initialPassword)
+  const provided = supplied !== null
+  const password = provided ? supplied : generateTemporaryPassword()
 
   const cr = await createAuthUser(svc, email, password, fullName)
   if (!cr.ok) {
+    if (provided && isWeakPassword(cr)) throw weakPasswordError()
     if (!isEmailExists(cr)) {
       console.error('admin-users: create auth user failed, status', cr.status)
       throw new ApiError(502, 'upstream_error', 'สร้างบัญชีไม่สำเร็จ')
@@ -450,7 +505,7 @@ async function actCreate(svc, admin, body) {
     if (!adopt) {
       throw new ApiError(409, 'orphan_auth_user', ORPHAN_MESSAGE, { public: { lastSignInAt } })
     }
-    return adoptAuthUser(svc, admin, { id: existing.id.toLowerCase(), email, role, fullName, password, previousSignIn: lastSignInAt })
+    return adoptAuthUser(svc, admin, { id: existing.id.toLowerCase(), email, role, fullName, password, provided, previousSignIn: lastSignInAt })
   }
   const newId = cr.data && cr.data.id
   if (typeof newId !== 'string' || !UUID_RE.test(newId)) throw new ApiError(502, 'upstream_error', 'สร้างบัญชีไม่สำเร็จ')
@@ -472,10 +527,12 @@ async function actCreate(svc, admin, body) {
   }
 
   // Audit is part of the action: no audit row => no account.
-  if (!(await audit(svc, admin, 'admin.create_user', newId, { target_email: email, role }))) {
+  if (!(await audit(svc, admin, 'admin.create_user', newId, { target_email: email, role, ...(provided ? { passwordProvided: true } : {}) }))) {
     await abort(auditUnavailable())
   }
-  return { user: pickProfile(profile), temporaryPassword: password, audit: true }
+  return provided
+    ? { user: pickProfile(profile), passwordProvided: true, audit: true }
+    : { user: pickProfile(profile), temporaryPassword: password, audit: true }
 }
 
 // Audit-first wrapper for the remaining actions: if the row cannot be written nothing is done
