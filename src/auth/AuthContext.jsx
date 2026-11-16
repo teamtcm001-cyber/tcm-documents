@@ -3,6 +3,7 @@ import {
   getSession, signIn, signOut as apiSignOut, onAuthStateChange, fetchMyProfile, fetchMyMemberships,
   subscribeAuthProblem,
 } from '../api/supabase.js'
+import { EDIT_MEMBER_ROLES } from '../utils/roles.js'
 
 // Who is signed in and what they may do.
 //
@@ -10,7 +11,8 @@ import {
 // RLS is the real enforcement. canEditProject() & friends only decide what the UI offers,
 // and mirror can_edit_project() / can_view_project() from scripts/auth-01-foundation.sql:
 //   admin -> edits every project          exec -> edits nothing (read-only everywhere)
-//   user  -> edits a project only when project_members.role = 'editor'
+//   user  -> edits a project only when project_members.role = 'editor' or 'manager'
+//   manager (project_members.role) additionally manages the people of THAT project (canManageProject)
 const AuthCtx = createContext(null)
 
 export const useAuth = () => {
@@ -321,8 +323,10 @@ export function AuthProvider({ children }) {
     const isAdmin = role === 'admin'
     const isExec = role === 'exec'
     const isMember = role === 'user'
-    const canEditProject = (projectId) => isAdmin || (isMember && memberships[projectId] === 'editor')
-    const canUploadAny = isAdmin || (isMember && Object.values(memberships).includes('editor'))
+    const canEditProject = (projectId) => isAdmin || (isMember && EDIT_MEMBER_ROLES.includes(memberships[projectId]))
+    // manager of THAT project (admins manage every project). exec / editor / viewer never.
+    const canManageProject = (projectId) => isAdmin || (isMember && memberships[projectId] === 'manager')
+    const canUploadAny = isAdmin || (isMember && Object.values(memberships).some((r) => EDIT_MEMBER_ROLES.includes(r)))
     return {
       status,
       profile,
@@ -334,6 +338,7 @@ export function AuthProvider({ children }) {
       membershipsFailed,
       myProjectIds: new Set(Object.keys(memberships)),
       canEditProject,
+      canManageProject,
       canUploadAny,
       canCreateProject: isAdmin,
       canDeleteProject: isAdmin,

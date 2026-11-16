@@ -1,11 +1,37 @@
 import Icon from './Icon.jsx'
 import { ToneBadge } from './TrackingBits.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
-import { ROLE_LABEL, ROLE_TONE, READ_ONLY_LABEL, NO_PROJECT_ACCESS_MESSAGE } from '../utils/roles.js'
+import {
+  ROLE_LABEL, ROLE_TONE, READ_ONLY_LABEL, NO_PROJECT_ACCESS_MESSAGE, MEMBERSHIP_LABEL, MEMBER_ROLE_TONE, MEMBER_ROLE_DESC,
+} from '../utils/roles.js'
 
 export function RoleBadge({ role }) {
   if (!role) return null
   return <ToneBadge tone={ROLE_TONE[role] || 'mute'}>{ROLE_LABEL[role] || role}</ToneBadge>
+}
+
+// project_members.role of one person in one project (ผู้ดูแลโครงการ / แก้ไขได้ / ดูอย่างเดียว)
+export function MemberRoleBadge({ role }) {
+  if (!role) return null
+  return (
+    <ToneBadge tone={MEMBER_ROLE_TONE[role] || 'mute'} title={MEMBER_ROLE_DESC[role]}>
+      {MEMBERSHIP_LABEL[role] || role}
+    </ToneBadge>
+  )
+}
+
+// "You manage this project": shown to a project manager (admins manage everything, so they do not need it).
+export function ManagerBadge({ className = '', style }) {
+  return (
+    <span
+      className={`readonly-badge manager-badge ${className}`}
+      title="คุณเป็นผู้ดูแลโครงการนี้ — แก้ไขโครงการและจัดการสมาชิกของโครงการได้"
+      style={style}
+      data-testid="manager-badge"
+    >
+      <Icon name="shield" size={12} /> {MEMBERSHIP_LABEL.manager}
+    </span>
+  )
 }
 
 // Subtle marker instead of silently hiding edit controls.

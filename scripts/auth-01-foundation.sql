@@ -35,6 +35,8 @@
 --   5. Run scripts/auth-test.sql (after 01 only the function/profile checks apply).
 --   6. Run scripts/auth-02-enforce-rls.sql  (the cutover; old shared-account app stops).
 --   7. Run scripts/auth-test.sql again - every check must be PASS.
+--   8. scripts/auth-04-project-managers.sql (project managers = "Project Co as project admin";
+--      safe while the app is live; the role value 'manager' is unused until somebody is made manager).
 --   Emergency: scripts/auth-03-rollback.sql.
 --
 -- WHAT THIS FILE CREATES
@@ -43,6 +45,8 @@
 --              public._project_members_pre_auth (backup copy; only if project_members existed)
 --   functions  public.my_profile()  public.is_admin()  public.is_exec()
 --              public.can_view_project(uuid)  public.can_edit_project(uuid)
+--              (can_edit_project treats project_members.role 'editor' AND 'manager' as editor;
+--               the manager RPCs themselves live in scripts/auth-04-project-managers.sql)
 --              public.clear_must_change_password()           (needs a REAL password change)
 --              public.bootstrap_first_admin(text)            (SQL editor only)
 --              public.set_pw_marker(uuid)                    (service_role only; admin API)
@@ -156,20 +160,24 @@ grant select (id, email, full_name, role, active, must_change_password, created_
 -- 2. public.project_members  (create, or migrate the OLD ACL shape in place)
 --    Old shape (SQL_SCHEMA.sql): id uuid PK, project_id, user_id, role default
 --    'viewer' (owner/manager/editor/viewer), created_at timestamp, UNIQUE(project_id,user_id).
---    New contract: (project_id, user_id, role in ('editor','viewer'), created_at),
---    exactly one row per (project, user).
+--    New contract: (project_id, user_id, role in ('editor','viewer','manager'), created_at),
+--    exactly one row per (project, user).  'manager' = editor + may add/remove/change the
+--    people of THAT project through the RPCs of auth-04 (never creates accounts).
 --    If the table exists:
 --      a. a backup copy is taken ONCE into public._project_members_pre_auth
 --      b. missing columns are added (project_id, user_id, role, created_at)
 --      c. role mapping: owner/manager/editor -> 'editor'; viewer -> 'viewer';
---         NULL or any unknown value -> 'viewer' (least privilege)
+--         NULL or any unknown value -> 'viewer' (least privilege).
+--         EXCEPTION (re-runs): when the table was ALREADY migrated by this script (the CHECK
+--         project_members_role_chk exists), 'manager' is the NEW role and is KEPT - re-running
+--         auth-01 after auth-04 must never demote a project manager to editor.
 --      d. rows with NULL project_id/user_id, or pointing at a project / auth user that
 --         no longer exists, are deleted (unusable; they are in the backup)
 --      e. duplicate (project_id,user_id) rows are collapsed (editor wins)
 --      f. NOT NULL on project_id/user_id/role; FKs added if absent (ON DELETE CASCADE);
 --         a UNIQUE index on (project_id,user_id) is added if none exists
 --      g. every old CHECK that mentions `role` is dropped and replaced by
---         project_members_role_chk (role in ('editor','viewer'))
+--         project_members_role_chk (role in ('editor','viewer','manager'))
 --      The legacy `id` column (if present) is KEPT; nothing depends on it.
 --      Existing policies/grants on it are untouched.
 -- ----------------------------------------------------------------------------
@@ -181,6 +189,7 @@ declare
   v_deleted bigint := 0;
   v_deduped bigint := 0;
   v_has_uq  boolean;
+  v_keep_mgr boolean := false;   -- table already migrated by auth-01: 'manager' is the new role, keep it
 begin
   if not v_existed then
     create table public.project_members (
@@ -210,6 +219,11 @@ begin
     alter table public.project_members add column if not exists role       text;
     alter table public.project_members add column if not exists created_at timestamptz default now();
 
+    -- already migrated by an earlier run of this script? (our CHECK exists) -> 'manager' is NOT legacy
+    v_keep_mgr := exists (select 1 from pg_constraint
+                          where conrelid = 'public.project_members'::regclass
+                            and conname = 'project_members_role_chk');
+
     -- g (first half). drop every CHECK mentioning role so the mapping below cannot trip it
     for c in
       select conname from pg_constraint
@@ -223,8 +237,14 @@ begin
 
     -- c. role mapping
     update public.project_members
-       set role = case when role in ('owner','manager','editor') then 'editor' else 'viewer' end
-     where role is distinct from case when role in ('owner','manager','editor') then 'editor' else 'viewer' end;
+       set role = case when role in ('owner','editor') then 'editor'
+                       when role = 'manager' and v_keep_mgr then 'manager'
+                       when role = 'manager' then 'editor'
+                       else 'viewer' end
+     where role is distinct from case when role in ('owner','editor') then 'editor'
+                                      when role = 'manager' and v_keep_mgr then 'manager'
+                                      when role = 'manager' then 'editor'
+                                      else 'viewer' end;
     get diagnostics v_mapped = row_count;
 
     -- d. unusable rows
@@ -235,14 +255,14 @@ begin
         or not exists (select 1 from auth.users u where u.id = m.user_id);
     get diagnostics v_deleted = row_count;
 
-    -- e. duplicates (keep the editor row, else the oldest)
+    -- e. duplicates (keep the highest role: manager > editor > viewer, else the oldest)
     delete from public.project_members
      where ctid in (
        select d.ctid from (
          select ctid,
                 row_number() over (
                   partition by project_id, user_id
-                  order by (role = 'editor') desc, created_at nulls last
+                  order by (case role when 'manager' then 0 when 'editor' then 1 else 2 end), created_at nulls last
                 ) as rn
          from public.project_members
        ) d
@@ -296,7 +316,7 @@ begin
   -- g (second half). the new CHECK (both paths)
   alter table public.project_members drop constraint if exists project_members_role_chk;
   alter table public.project_members
-    add constraint project_members_role_chk check (role in ('editor','viewer'));
+    add constraint project_members_role_chk check (role in ('editor','viewer','manager'));
 end
 $pm$;
 
@@ -364,7 +384,8 @@ as $$
   )
 $$;
 
--- admin or exec: every project. user: only projects with any membership row.
+-- admin or exec: every project. user: only projects with any membership row
+-- (editor, viewer or manager).
 create or replace function public.can_view_project(p uuid)
 returns boolean
 language sql
@@ -387,8 +408,11 @@ as $$
   )
 $$;
 
--- admin: every project. user: only projects where membership role = 'editor'.
+-- admin: every project. user: only projects where membership role = 'editor' OR 'manager'
+-- (a project manager is also an editor of that project).
 -- exec is NEVER an editor (read-only), even if a membership row exists.
+-- NOTE: scripts/auth-04-project-managers.sql re-creates this function with the IDENTICAL body
+-- (so a live DB that only ever ran an older auth-01 gets it); keep the two copies in sync.
 create or replace function public.can_edit_project(p uuid)
 returns boolean
 language sql
@@ -406,7 +430,7 @@ as $$
         pr.role = 'admin'
         or (pr.role = 'user' and exists (
               select 1 from public.project_members m
-              where m.project_id = p and m.user_id = pr.id and m.role = 'editor'))
+              where m.project_id = p and m.user_id = pr.id and m.role in ('editor','manager')))
       )
   )
 $$;

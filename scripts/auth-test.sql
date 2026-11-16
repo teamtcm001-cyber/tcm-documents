@@ -29,11 +29,11 @@
 --   * Identities are simulated with SET LOCAL ROLE authenticated/anon plus
 --     set_config('request.jwt.claims', ...) / 'request.jwt.claim.sub' - exactly what
 --     PostgREST does - so RLS, grants and auth.uid() behave as for a real login.
---   * Synthetic users (8 + 1 created inside the last-admin test): admin, exec, editor (editor of project A), viewer (viewer of A),
+--   * Synthetic users (9 + 1 created inside the last-admin test): admin, exec, editor (editor of project A), viewer (viewer of A),
 --     nonmember (user, no membership), noprofile (auth user, no profiles row),
---     inactive (profile active=false, editor membership of A). Two synthetic projects A, B
+--     inactive (profile active=false, editor membership of A), mustchange, manager (manager of A). Two synthetic projects A, B
 --     with one row of every kind in each.
---   * profiles / project_members reference auth.users, so the test INSERTs 8 minimal rows
+--   * profiles / project_members reference auth.users, so the test INSERTs 9 minimal rows
 --     into auth.users (id, aud, role, email) inside the rolled-back transaction. If your
 --     project refuses that (a custom trigger on auth.users), the test falls back to
 --     SET LOCAL session_replication_role = replica, which skips FK checks and user
@@ -60,6 +60,18 @@
 --     anon / authenticated checked from the catalogue AND by a direct call.
 --   * files.uploader_id cannot be forged on INSERT. The anon helper check uses dynamic SQL
 --     (a plain plpgsql expression caches its privilege check across role switches).
+--
+-- ADDED FOR PROJECT MANAGERS (auth-01 helpers/CHECK, auth-04 RPCs)
+--   * 'manager' identity: a user with project_members.role = 'manager' on project A. It runs the same
+--     data-table suite as the editor (a manager is an editor of A, nothing on B, cannot create or delete
+--     projects, cannot read audit_log, cannot write project_members directly).
+--   * pg_temp.mgr_tests (needs auth-04, otherwise SKIP): is_project_manager / list_project_members /
+--     find_user_for_project (EXACT case-insensitive match only; admin, exec, inactive, unknown, partial,
+--     wildcard, empty, over-long and NULL input -> 0 rows) / set_project_member / remove_project_member
+--     for admin, manager, manager-of-another-project and every identity that must be refused (anon,
+--     viewer, editor, exec, non-member, no profile, inactive, temp-password holder, an inactive or
+--     must-change MANAGER, an exec holding a manager row, a demoted manager); eligibility of targets;
+--     no self change; invalid roles; the real actor in audit_log; constraint; privileges.
 --
 -- WHAT IS CHECKED
 --   Always (after 01):  helper functions per identity (admin/exec/editor/viewer/non-member/
@@ -238,6 +250,7 @@ declare
   k     text := case p_label
                   when 'admin'  then 'admin'  when 'exec'   then 'exec'
                   when 'editor' then 'editor' when 'viewer' then 'viewer'
+                  when 'manager' then 'editor'      -- a manager is an editor of A and nothing more on the data tables
                   when 'anon'   then 'anon'   else 'none' end;
   v_role text := case when p_label = 'anon' then 'anon' else 'authenticated' end;
   r      record;
@@ -267,13 +280,14 @@ begin
     v_my   := case when p_label in ('noprofile','inactive') then '<null>'
                    when p_label = 'anon' then 'err:42501'
                    else p_uid::text end;
-    v_prof := case p_label when 'admin' then 'n:7' when 'noprofile' then 'n:0'
+    v_prof := case p_label when 'admin' then 'n:8' when 'noprofile' then 'n:0'
                            when 'anon' then 'err:42501|n:0' else 'n:1' end;
     -- inactive: pm_select_own requires an ACTIVE profile -> 0. (Before auth-02 the pre-existing
     -- legacy policy "Users can view their memberships" may still show the row: accept 1 then.)
-    -- admin/exec see all 4 seeded membership rows (editor A, viewer A, inactive A, mustchange A)
-    v_pm   := case p_label when 'admin' then 'n:4' when 'exec' then 'n:4'
-                           when 'editor' then 'n:1' when 'viewer' then 'n:1'
+    -- admin/exec see all 5 seeded membership rows (editor A, viewer A, inactive A, mustchange A, manager A);
+    -- a manager still reads only HIS OWN row directly (the others via list_project_members)
+    v_pm   := case p_label when 'admin' then 'n:5' when 'exec' then 'n:5'
+                           when 'editor' then 'n:1' when 'viewer' then 'n:1' when 'manager' then 'n:1'
                            when 'inactive' then case when p_enforced then 'n:0' else 'n:0|n:1' end
                            -- temp-password holder: pm_select_own is closed (legacy policy may still show it before 02)
                            when 'mustchange' then case when p_enforced then 'n:0' else 'n:0|n:1' end
@@ -341,6 +355,17 @@ begin
     end if;
 
     -- membership: self-promotion / tampering is impossible for everyone but admin
+    if p_label = 'manager' then
+      q := pg_temp.ex(q, p_label || ': cannot INSERT membership directly (A) for another user (RPC only)',
+                      pg_temp.dml(format('insert into public.project_members (project_id, user_id, role) values (%L, %L, ''viewer'')', c_pa, 'aaaaaaaa-0000-4000-8000-000000000005'::uuid)),
+                      'err:42501');
+      q := pg_temp.ex(q, p_label || ': cannot UPDATE another member row directly',
+                      pg_temp.dml(format('update public.project_members set role = ''viewer'' where project_id = %L and user_id = %L', c_pa, 'aaaaaaaa-0000-4000-8000-000000000003'::uuid)),
+                      'rows:0|err:42501');
+      q := pg_temp.ex(q, p_label || ': cannot DELETE another member row directly',
+                      pg_temp.dml(format('delete from public.project_members where project_id = %L and user_id = %L', c_pa, 'aaaaaaaa-0000-4000-8000-000000000003'::uuid)),
+                      'rows:0|err:42501');
+    end if;
     q := pg_temp.ex(q, p_label || ': INSERT membership (B) for self',
                     pg_temp.dml(format('insert into public.project_members (project_id, user_id, role) values (%L, %L, ''editor'')', c_pb, p_uid)),
                     case k when 'admin' then 'rows:1' else 'err:42501' end);
@@ -808,6 +833,335 @@ end
 $fn$;
 
 -- ---------------------------------------------------------------------------
+-- project managers (auth-04). Sub-block, ROLLED BACK. Everything a manager / admin / outsider can do
+-- through the RPCs, the real actor in audit_log, and who is refused.
+-- ---------------------------------------------------------------------------
+create function pg_temp.msg(p_sql text)
+returns text language plpgsql as $$
+begin
+  execute p_sql;
+  return 'ok';
+exception when others then
+  return 'err:' || sqlstate || ':' || sqlerrm;
+end $$;
+
+create function pg_temp.s_set(p uuid, u uuid, r text)
+returns text language sql as $$ select format('select public.set_project_member(%L, %L, %L)', p, u, r) $$;
+create function pg_temp.s_rm(p uuid, u uuid)
+returns text language sql as $$ select format('select public.remove_project_member(%L, %L)', p, u) $$;
+create function pg_temp.s_list(p uuid)
+returns text language sql as $$ select format('select 1 from public.list_project_members(%L)', p) $$;
+create function pg_temp.s_find(p uuid, e text)
+returns text language sql as $$ select format('select 1 from public.find_user_for_project(%L, %L)', p, e) $$;
+
+-- is_project_manager() + the 4 RPCs as ONE identity that must be refused on project p.
+-- anon: EXECUTE is revoked -> SQLSTATE 42501 from Postgres itself (its message differs).
+create function pg_temp.refused(q jsonb, p_label text, p_uid uuid, p_email text, p_role text, p uuid, u uuid)
+returns jsonb language plpgsql as $$
+declare
+  w text := case when p_role = 'anon' then 'err:42501' else 'err:42501:FORBIDDEN' end;
+  r text;
+begin
+  perform pg_temp.act(p_uid, p_email, p_role);
+  q := pg_temp.ex(q, p_label || ': is_project_manager() is false',
+         pg_temp.val(format('select public.is_project_manager(%L)::text', p)), case when p_role = 'anon' then 'err:42501' else 'false' end);
+  foreach r in array array[pg_temp.s_list(p), pg_temp.s_find(p, 'tcmtest.nonmember@example.invalid'),
+                           pg_temp.s_set(p, u, 'viewer'), pg_temp.s_rm(p, u)] loop
+    q := pg_temp.ex(q, p_label || ': RPC refused (' || left(regexp_replace(r, '^select (1 from )?public\.', ''), 22) || ')',
+           case when p_role = 'anon' then pg_temp.dml(r) else pg_temp.msg(r) end, w);
+  end loop;
+  return q;
+end $$;
+
+create function pg_temp.mgr_tests(p_enf boolean)
+returns jsonb
+language plpgsql
+as $fn$
+declare
+  q       jsonb := '[]'::jsonb;
+  c_admin constant uuid := 'aaaaaaaa-0000-4000-8000-000000000001';
+  c_exec  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000002';
+  c_edit  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000003';
+  c_view  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000004';
+  c_nonm  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000005';
+  c_nopr  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000006';
+  c_inac  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000007';
+  c_temp  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000008';
+  c_mgr   constant uuid := 'aaaaaaaa-0000-4000-8000-00000000000a';
+  e_admin constant text := 'tcmtest.admin@example.invalid';
+  e_exec  constant text := 'tcmtest.exec@example.invalid';
+  e_edit  constant text := 'tcmtest.editor@example.invalid';
+  e_view  constant text := 'tcmtest.viewer@example.invalid';
+  e_nonm  constant text := 'tcmtest.nonmember@example.invalid';
+  e_nopr  constant text := 'tcmtest.noprofile@example.invalid';
+  e_inac  constant text := 'tcmtest.inactive@example.invalid';
+  e_temp  constant text := 'tcmtest.mustchange@example.invalid';
+  e_mgr   constant text := 'tcmtest.manager@example.invalid';
+  c_pa    constant uuid := 'bbbbbbbb-0000-4000-8000-00000000000a';
+  c_pb    constant uuid := 'bbbbbbbb-0000-4000-8000-00000000000b';
+  c_nowhere constant uuid := '99999999-0000-4000-8000-0000000000fe';   -- no such project
+  c_ghost   constant uuid := '99999999-0000-4000-8000-0000000000fd';   -- no such user
+  rid_nonm  constant text := 'bbbbbbbb-0000-4000-8000-00000000000a:aaaaaaaa-0000-4000-8000-000000000005';
+  n       bigint;
+begin
+  begin
+    perform pg_temp.reset_actor();
+    if to_regprocedure('public.set_project_member(uuid,uuid,text)') is null
+       or to_regprocedure('public.is_project_manager(uuid)') is null then
+      q := q || jsonb_build_array(jsonb_build_array('SKIP:project-manager RPCs (is_project_manager, list/find/set/remove)',
+                                                    'scripts/auth-04-project-managers.sql has not been run yet', ''));
+      raise exception 'nothing to test' using errcode = 'TC001';
+    end if;
+    -- the manager is a plain viewer of B; the viewer also belongs to B: used by the cross-project checks
+    insert into public.project_members (project_id, user_id, role) values (c_pb, c_view, 'viewer'), (c_pb, c_mgr, 'viewer');
+
+    -- ================= 1. the manager of A =================
+    perform pg_temp.act(c_mgr, e_mgr);
+    q := pg_temp.ex(q, 'manager: is_project_manager(A) is true', pg_temp.val(format('select public.is_project_manager(%L)::text', c_pa)), 'true');
+    q := pg_temp.ex(q, 'manager: is_project_manager(B) is false (only a viewer there)', pg_temp.val(format('select public.is_project_manager(%L)::text', c_pb)), 'false');
+    q := pg_temp.ex(q, 'manager: is_project_manager(unknown project) is false', pg_temp.val(format('select public.is_project_manager(%L)::text', c_nowhere)), 'false');
+    q := pg_temp.ex(q, 'manager: is_project_manager(NULL) is false', pg_temp.val('select public.is_project_manager(null)::text'), 'false');
+    q := pg_temp.ex(q, 'manager: edits A, only views B (can_edit / can_view)', pg_temp.caps(c_pa) || ' / ' || pg_temp.caps(c_pb),
+                    'admin=false,exec=false,view=true,edit=true / admin=false,exec=false,view=true,edit=false');
+
+    -- list
+    q := pg_temp.ex(q, 'manager: list_project_members(A) returns the 5 members', pg_temp.cnt(pg_temp.s_list(c_pa)), 'n:5');
+    q := pg_temp.ex(q, 'manager: list order is manager, editors, viewer',
+                    pg_temp.val(format('select string_agg(role, '','') from public.list_project_members(%L)', c_pa)), 'manager,editor,editor,editor,viewer');
+    q := pg_temp.ex(q, 'manager: list carries user_id, email, full_name, role, active',
+                    pg_temp.val(format('select (email = %L and full_name = ''T manager'' and role = ''manager'' and active)::text from public.list_project_members(%L) where user_id = %L', e_mgr, c_pa, c_mgr)), 'true');
+    q := pg_temp.ex(q, 'manager: list shows an inactive member as active = false',
+                    pg_temp.val(format('select active::text from public.list_project_members(%L) where user_id = %L', c_pa, c_inac)), 'false');
+    q := pg_temp.ex(q, 'manager: list_project_members(B) refused (FORBIDDEN)', pg_temp.msg(pg_temp.s_list(c_pb)), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'manager: list_project_members(unknown project) refused', pg_temp.msg(pg_temp.s_list(c_nowhere)), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'manager: list_project_members(NULL) refused', pg_temp.msg('select 1 from public.list_project_members(null)'), 'err:42501:FORBIDDEN');
+
+    -- find: exact match only
+    q := pg_temp.ex(q, 'find: exact e-mail finds the account', pg_temp.cnt(pg_temp.s_find(c_pa, e_nonm)), 'n:1');
+    q := pg_temp.ex(q, 'find: result row = user_id, e-mail, name, member_role NULL for a non-member',
+                    pg_temp.val(format('select (user_id = %L and email = %L and full_name = ''T nonmember'' and member_role is null)::text from public.find_user_for_project(%L, %L)', c_nonm, e_nonm, c_pa, e_nonm)), 'true');
+    q := pg_temp.ex(q, 'find: case-insensitive', pg_temp.cnt(pg_temp.s_find(c_pa, upper(e_nonm))), 'n:1');
+    q := pg_temp.ex(q, 'find: surrounding blanks / tab are trimmed', pg_temp.cnt(pg_temp.s_find(c_pa, '  ' || e_nonm || E'\t ')), 'n:1');
+    q := pg_temp.ex(q, 'find: member_role of an editor', pg_temp.val(format('select member_role from public.find_user_for_project(%L, %L)', c_pa, e_edit)), 'editor');
+    q := pg_temp.ex(q, 'find: member_role of a viewer', pg_temp.val(format('select member_role from public.find_user_for_project(%L, %L)', c_pa, e_view)), 'viewer');
+    q := pg_temp.ex(q, 'find: member_role of a manager', pg_temp.val(format('select member_role from public.find_user_for_project(%L, %L)', c_pa, e_mgr)), 'manager');
+    q := pg_temp.ex(q, 'find: prefix (no domain) -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, 'tcmtest.nonmember')), 'n:0');
+    q := pg_temp.ex(q, 'find: missing last character -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, left(e_nonm, length(e_nonm) - 1))), 'n:0');
+    q := pg_temp.ex(q, 'find: trailing % wildcard -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, e_nonm || '%')), 'n:0');
+    q := pg_temp.ex(q, 'find: bare % -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, '%')), 'n:0');
+    q := pg_temp.ex(q, 'find: %@domain -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, '%@example.invalid')), 'n:0');
+    q := pg_temp.ex(q, 'find: _ wildcard -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, 'tcmtest_nonmember@example.invalid')), 'n:0');
+    q := pg_temp.ex(q, 'find: regex .* -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, '.*')), 'n:0');
+    q := pg_temp.ex(q, 'find: empty -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, '')), 'n:0');
+    q := pg_temp.ex(q, 'find: blanks only -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, '   ')), 'n:0');
+    q := pg_temp.ex(q, 'find: NULL -> 0 rows', pg_temp.cnt('select 1 from public.find_user_for_project(''' || c_pa || ''', null)'), 'n:0');
+    q := pg_temp.ex(q, 'find: over 254 characters -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, repeat('a', 300) || '@example.invalid')), 'n:0');
+    q := pg_temp.ex(q, 'find: admin account -> 0 rows (not revealed)', pg_temp.cnt(pg_temp.s_find(c_pa, e_admin)), 'n:0');
+    q := pg_temp.ex(q, 'find: exec account -> 0 rows (not revealed)', pg_temp.cnt(pg_temp.s_find(c_pa, e_exec)), 'n:0');
+    q := pg_temp.ex(q, 'find: inactive account -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, e_inac)), 'n:0');
+    q := pg_temp.ex(q, 'find: auth user without profile -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, e_nopr)), 'n:0');
+    q := pg_temp.ex(q, 'find: unknown e-mail -> 0 rows', pg_temp.cnt(pg_temp.s_find(c_pa, 'nobody@example.invalid')), 'n:0');
+    q := pg_temp.ex(q, 'find: project B refused (FORBIDDEN)', pg_temp.msg(pg_temp.s_find(c_pb, e_nonm)), 'err:42501:FORBIDDEN');
+
+    -- ================= 2. set / remove + the REAL actor in audit_log (nonmember starts with no row in A) =================
+    q := pg_temp.ex(q, 'manager: add an existing account as viewer', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'viewer')), 'ok');
+    q := pg_temp.ex(q, '...it shows in the list as viewer', pg_temp.val(format('select role from public.list_project_members(%L) where user_id = %L', c_pa, c_nonm)), 'viewer');
+    q := pg_temp.ex(q, '...and find reports member_role viewer', pg_temp.val(format('select member_role from public.find_user_for_project(%L, %L)', c_pa, e_nonm)), 'viewer');
+    q := pg_temp.ex(q, 'manager: change viewer -> editor', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'editor')), 'ok');
+    q := pg_temp.ex(q, '...list says editor', pg_temp.val(format('select role from public.list_project_members(%L) where user_id = %L', c_pa, c_nonm)), 'editor');
+    q := pg_temp.ex(q, 'manager: setting the same role again is accepted (no-op)', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'editor')), 'ok');
+    q := pg_temp.ex(q, 'manager: remove the member', pg_temp.msg(pg_temp.s_rm(c_pa, c_nonm)), 'ok');
+    q := pg_temp.ex(q, '...gone from the list', pg_temp.cnt(format('select 1 from public.list_project_members(%L) where user_id = %L', c_pa, c_nonm)), 'n:0');
+    q := pg_temp.ex(q, 'manager: removing a membership that does not exist is a no-op', pg_temp.msg(pg_temp.s_rm(c_pa, c_nonm)), 'ok');
+    q := pg_temp.ex(q, 'manager: removing a user that does not exist is a no-op', pg_temp.msg(pg_temp.s_rm(c_pa, c_ghost)), 'ok');
+
+    perform pg_temp.reset_actor();
+    select count(*) into n from public.audit_log
+     where table_name = 'project_members' and row_id = rid_nonm and action = 'insert'
+       and user_id = c_mgr and user_email = e_mgr and project_id = c_pa
+       and details ->> 'target_email' = e_nonm and details ->> 'role' = 'viewer' and details ->> 'project_id' = c_pa::text;
+    q := pg_temp.ex(q, 'audit: RPC insert logged with the MANAGER as actor, project, target e-mail and role', n::text, '1');
+    select count(*) into n from public.audit_log
+     where table_name = 'project_members' and row_id = rid_nonm and action = 'update'
+       and user_id = c_mgr and user_email = e_mgr and project_id = c_pa
+       and details ->> 'target_email' = e_nonm and details -> 'role' ->> 'old' = 'viewer' and details -> 'role' ->> 'new' = 'editor';
+    q := pg_temp.ex(q, 'audit: RPC role change logged (old viewer / new editor) by the manager', n::text, '1');
+    select count(*) into n from public.audit_log
+     where table_name = 'project_members' and row_id = rid_nonm and action = 'delete'
+       and user_id = c_mgr and user_email = e_mgr and project_id = c_pa
+       and details ->> 'target_email' = e_nonm and details ->> 'role' = 'editor';
+    q := pg_temp.ex(q, 'audit: RPC removal logged by the manager (with the removed role)', n::text, '1');
+    select count(*) into n from public.audit_log where table_name = 'project_members' and row_id = rid_nonm;
+    q := pg_temp.ex(q, 'audit: exactly 3 rows (insert, update, delete): the no-op wrote nothing', n::text, '3');
+    select count(*) into n from public.audit_log
+     where table_name = 'project_members' and row_id = rid_nonm and (user_email = 'service' or user_id is null);
+    q := pg_temp.ex(q, 'audit: none of them is attributed to service / null', n::text, '0');
+
+    perform pg_temp.act(c_mgr, e_mgr);
+    -- roles and targets
+    q := pg_temp.ex(q, 'manager: appoint ANOTHER manager of A', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'manager')), 'ok');
+    q := pg_temp.ex(q, '...list says manager', pg_temp.val(format('select role from public.list_project_members(%L) where user_id = %L', c_pa, c_nonm)), 'manager');
+    q := pg_temp.ex(q, 'manager: remove a fellow manager', pg_temp.msg(pg_temp.s_rm(c_pa, c_nonm)), 'ok');
+    q := pg_temp.ex(q, 'manager: invalid role owner', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'owner')), 'err:22023:INVALID_ROLE');
+    q := pg_temp.ex(q, 'manager: invalid role admin', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'admin')), 'err:22023:INVALID_ROLE');
+    q := pg_temp.ex(q, 'manager: invalid role Manager (case matters)', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'Manager')), 'err:22023:INVALID_ROLE');
+    q := pg_temp.ex(q, 'manager: empty role', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, '')), 'err:22023:INVALID_ROLE');
+    q := pg_temp.ex(q, 'manager: NULL role', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, null)), 'err:22023:INVALID_ROLE');
+    q := pg_temp.ex(q, 'manager: cannot add an ADMIN account', pg_temp.msg(pg_temp.s_set(c_pa, c_admin, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'manager: cannot add an EXEC account', pg_temp.msg(pg_temp.s_set(c_pa, c_exec, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'manager: cannot add an INACTIVE account', pg_temp.msg(pg_temp.s_set(c_pa, c_inac, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'manager: cannot add an auth user without profile', pg_temp.msg(pg_temp.s_set(c_pa, c_nopr, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'manager: cannot add a user that does not exist', pg_temp.msg(pg_temp.s_set(c_pa, c_ghost, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'manager: NULL user', pg_temp.msg(pg_temp.s_set(c_pa, null, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'manager: may add a person who still holds a temporary password (not yet logged in)', pg_temp.msg(pg_temp.s_set(c_pa, c_temp, 'editor')), 'ok');
+    q := pg_temp.ex(q, 'manager: cannot change his OWN membership (to viewer)', pg_temp.msg(pg_temp.s_set(c_pa, c_mgr, 'viewer')), 'err:42501:SELF_CHANGE_FORBIDDEN');
+    q := pg_temp.ex(q, 'manager: cannot change his OWN membership (to manager, no-op)', pg_temp.msg(pg_temp.s_set(c_pa, c_mgr, 'manager')), 'err:42501:SELF_CHANGE_FORBIDDEN');
+    q := pg_temp.ex(q, 'manager: cannot REMOVE himself', pg_temp.msg(pg_temp.s_rm(c_pa, c_mgr)), 'err:42501:SELF_CHANGE_FORBIDDEN');
+    q := pg_temp.ex(q, '...he is still manager of A', pg_temp.val(format('select role from public.list_project_members(%L) where user_id = %L', c_pa, c_mgr)), 'manager');
+    q := pg_temp.ex(q, 'manager: may remove an inactive member of A', pg_temp.msg(pg_temp.s_rm(c_pa, c_inac)), 'ok');
+    q := pg_temp.ex(q, 'manager: may change a viewer of A to editor', pg_temp.msg(pg_temp.s_set(c_pa, c_view, 'editor')), 'ok');
+
+    -- another project
+    q := pg_temp.ex(q, 'manager of A: set_project_member(B) refused', pg_temp.msg(pg_temp.s_set(c_pb, c_nonm, 'viewer')), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'manager of A: set_project_member(B, himself) refused as FORBIDDEN (no self-promotion in B)', pg_temp.msg(pg_temp.s_set(c_pb, c_mgr, 'manager')), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'manager of A: remove_project_member(B) refused', pg_temp.msg(pg_temp.s_rm(c_pb, c_view)), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'manager of A: set_project_member(unknown project) refused as FORBIDDEN', pg_temp.msg(pg_temp.s_set(c_nowhere, c_nonm, 'viewer')), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'manager of A: remove_project_member(unknown project) refused', pg_temp.msg(pg_temp.s_rm(c_nowhere, c_nonm)), 'err:42501:FORBIDDEN');
+    perform pg_temp.reset_actor();
+    q := pg_temp.ex(q, 'project B memberships are untouched (the 2 seeded viewer rows, nobody new)',
+                    pg_temp.val(format('select string_agg(role, '','' order by user_id) from public.project_members where project_id = %L', c_pb)), 'viewer,viewer');
+
+    -- no direct table or admin power for a manager
+    perform pg_temp.act(c_mgr, e_mgr);
+    q := pg_temp.ex(q, 'manager: audit_log is invisible even after he made changes', pg_temp.cnt('select 1 from public.audit_log'), 'n:0|err:42501');
+    q := pg_temp.ex(q, 'manager: cannot UPDATE a profile (promote someone / himself)',
+                    pg_temp.dml(format('update public.profiles set role = ''admin'' where id in (%L, %L)', c_mgr, c_nonm)), 'err:42501|rows:0');
+    q := pg_temp.ex(q, 'manager: cannot INSERT a profile', pg_temp.dml('insert into public.profiles (id, email, role) values (gen_random_uuid(), ''tcmtest.y@example.invalid'', ''user'')'), 'err:42501');
+    q := pg_temp.ex(q, 'manager: cannot read other people''s profiles', pg_temp.cnt('select 1 from public.profiles where email like ''tcmtest.%@example.invalid'''), 'n:1');
+    q := pg_temp.ex(q, 'manager: cannot read project_members of A directly (only his own row)', pg_temp.cnt(format('select 1 from public.project_members where project_id = %L', c_pa)), 'n:1');
+    if p_enf then
+      q := pg_temp.ex(q, 'manager: cannot create a project', pg_temp.dml('insert into public.projects (name, code) values (''t'', ''ZZ-TCMTEST-M'')'), 'err:42501');
+      q := pg_temp.ex(q, 'manager: cannot delete project A', pg_temp.dml(format('delete from public.projects where id = %L', c_pa)), 'rows:0');
+      q := pg_temp.ex(q, 'manager: cannot delete project B', pg_temp.dml(format('delete from public.projects where id = %L', c_pb)), 'rows:0');
+      q := pg_temp.ex(q, 'manager: CAN edit project A (editor rights)', pg_temp.dml(format('update public.projects set client = ''zz'' where id = %L', c_pa)), 'rows:1');
+      q := pg_temp.ex(q, 'manager: cannot edit project B', pg_temp.dml(format('update public.projects set client = ''zz'' where id = %L', c_pb)), 'rows:0');
+    end if;
+
+    -- ================= 3. admin through the RPCs =================
+    perform pg_temp.reset_actor();
+    select count(*) into n from public.project_members where project_id = c_pa;
+    perform pg_temp.act(c_admin, e_admin);
+    q := pg_temp.ex(q, 'admin: is_project_manager is true for A, B and a project that does not exist',
+                    pg_temp.val(format('select (public.is_project_manager(%L) and public.is_project_manager(%L) and public.is_project_manager(%L))::text', c_pa, c_pb, c_nowhere)), 'true');
+    q := pg_temp.ex(q, 'admin: list_project_members(A) lists every member row', pg_temp.cnt(pg_temp.s_list(c_pa)), 'n:' || n);
+    q := pg_temp.ex(q, 'admin: list_project_members(unknown project) is empty', pg_temp.cnt(pg_temp.s_list(c_nowhere)), 'n:0');
+    q := pg_temp.ex(q, 'admin: find works in any project', pg_temp.cnt(pg_temp.s_find(c_nowhere, e_nonm)), 'n:1');
+    q := pg_temp.ex(q, 'admin: find still hides admin accounts', pg_temp.cnt(pg_temp.s_find(c_pa, e_admin)), 'n:0');
+    q := pg_temp.ex(q, 'admin: find still hides exec accounts', pg_temp.cnt(pg_temp.s_find(c_pa, e_exec)), 'n:0');
+    q := pg_temp.ex(q, 'admin: add a member to B', pg_temp.msg(pg_temp.s_set(c_pb, c_nonm, 'viewer')), 'ok');
+    q := pg_temp.ex(q, 'admin: appoint a manager of B', pg_temp.msg(pg_temp.s_set(c_pb, c_nonm, 'manager')), 'ok');
+    q := pg_temp.ex(q, 'admin: set_project_member on a missing project', pg_temp.msg(pg_temp.s_set(c_nowhere, c_nonm, 'viewer')), 'err:P0002:PROJECT_NOT_FOUND');
+    q := pg_temp.ex(q, 'admin: cannot add an admin account either', pg_temp.msg(pg_temp.s_set(c_pa, c_admin, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'admin: cannot add an exec account either', pg_temp.msg(pg_temp.s_set(c_pa, c_exec, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'admin: cannot add an inactive account either', pg_temp.msg(pg_temp.s_set(c_pa, c_inac, 'viewer')), 'err:P0002:TARGET_NOT_ELIGIBLE');
+    q := pg_temp.ex(q, 'admin: invalid role', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'owner')), 'err:22023:INVALID_ROLE');
+    q := pg_temp.ex(q, 'admin: remove with his own id is allowed (no row: no-op)', pg_temp.msg(pg_temp.s_rm(c_pa, c_admin)), 'ok');
+    q := pg_temp.ex(q, 'admin: may change the manager''s own row (demote and restore)',
+                    pg_temp.msg(pg_temp.s_set(c_pa, c_mgr, 'viewer')) || ' ' || pg_temp.msg(pg_temp.s_set(c_pa, c_mgr, 'manager')), 'ok ok');
+    q := pg_temp.ex(q, 'admin: remove a member of B', pg_temp.msg(pg_temp.s_rm(c_pb, c_nonm)), 'ok');
+    perform pg_temp.reset_actor();
+    select count(*) into n from public.audit_log
+     where table_name = 'project_members' and row_id = c_pb::text || ':' || c_nonm::text
+       and user_id = c_admin and user_email = e_admin and project_id = c_pb and details ->> 'target_email' = e_nonm;
+    q := pg_temp.ex(q, 'audit: admin RPC changes (insert, update, delete) logged with the admin as actor', n::text, '3');
+
+    -- ================= 4. a manager appointed by a manager works at once; he may remove the first one =================
+    delete from public.project_members where project_id = c_pa and user_id in (c_nonm, c_temp);
+    perform pg_temp.act(c_mgr, e_mgr);
+    q := pg_temp.ex(q, 'chain: manager appoints nonmember as manager', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'manager')), 'ok');
+    perform pg_temp.act(c_nonm, e_nonm);
+    q := pg_temp.ex(q, 'chain: the new manager is manager of A at once (and edits A)', pg_temp.val(format('select public.is_project_manager(%L)::text', c_pa)) || ' ' || pg_temp.caps(c_pa),
+                    'true admin=false,exec=false,view=true,edit=true');
+    q := pg_temp.ex(q, 'chain: ...but not of B', pg_temp.val(format('select public.is_project_manager(%L)::text', c_pb)), 'false');
+    q := pg_temp.ex(q, 'chain: new manager cannot change himself', pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'viewer')), 'err:42501:SELF_CHANGE_FORBIDDEN');
+    q := pg_temp.ex(q, 'chain: new manager cannot remove himself', pg_temp.msg(pg_temp.s_rm(c_pa, c_nonm)), 'err:42501:SELF_CHANGE_FORBIDDEN');
+    q := pg_temp.ex(q, 'chain: new manager can add somebody', pg_temp.msg(pg_temp.s_set(c_pa, c_temp, 'viewer')), 'ok');
+    q := pg_temp.ex(q, 'chain: new manager can remove the first manager', pg_temp.msg(pg_temp.s_rm(c_pa, c_mgr)), 'ok');
+    perform pg_temp.act(c_mgr, e_mgr);
+    q := pg_temp.ex(q, 'chain: the removed manager is refused at once', pg_temp.msg(pg_temp.s_list(c_pa)), 'err:42501:FORBIDDEN');
+    q := pg_temp.ex(q, 'chain: ...and can no longer edit A or see it', pg_temp.caps(c_pa), 'admin=false,exec=false,view=false,edit=false');
+
+    -- ================= 5. everybody else is refused (is_project_manager + the 4 RPCs) =================
+    perform pg_temp.reset_actor();
+    -- the former manager is now a plain VIEWER of A: a demoted manager is refused
+    insert into public.project_members (project_id, user_id, role) values (c_pa, c_mgr, 'viewer')
+      on conflict (project_id, user_id) do update set role = 'viewer';
+    q := pg_temp.refused(q, 'demoted manager (now viewer)', c_mgr, e_mgr, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'viewer',     c_view, e_view, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'editor',     c_edit, e_edit, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'exec',       c_exec, e_exec, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'non-member of B (manager of A only)', c_nonm, e_nonm, 'authenticated', c_pb, c_view);
+    q := pg_temp.refused(q, 'no profile', c_nopr, e_nopr, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'inactive editor', c_inac, e_inac, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'must-change editor', c_temp, e_temp, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'anon', null, null, 'anon', c_pa, c_nonm);
+    -- authenticated but without any JWT claims at all (auth.uid() is null)
+    perform pg_temp.act(null, null, 'authenticated');
+    q := pg_temp.ex(q, 'authenticated without claims: refused', pg_temp.msg(pg_temp.s_list(c_pa)) || ' ' || pg_temp.msg(pg_temp.s_set(c_pa, c_nonm, 'viewer')), 'err:42501:FORBIDDEN err:42501:FORBIDDEN');
+
+    -- people who WOULD be managers, but must still be refused
+    perform pg_temp.reset_actor();
+    insert into public.project_members (project_id, user_id, role) values
+      (c_pa, c_inac, 'manager'), (c_pa, c_temp, 'manager'), (c_pa, c_exec, 'manager'), (c_pa, c_mgr, 'manager')
+      on conflict (project_id, user_id) do update set role = 'manager';
+    q := pg_temp.refused(q, 'INACTIVE manager', c_inac, e_inac, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'MUST-CHANGE-PASSWORD manager', c_temp, e_temp, 'authenticated', c_pa, c_nonm);
+    q := pg_temp.refused(q, 'exec holding a manager row', c_exec, e_exec, 'authenticated', c_pa, c_nonm);
+    perform pg_temp.act(c_exec, e_exec);
+    q := pg_temp.ex(q, 'exec holding a manager row: still read-only (cannot edit A)', pg_temp.caps(c_pa), 'admin=false,exec=true,view=true,edit=false');
+    -- the real manager works, then is deactivated / gets a temporary password -> refused on the very next call
+    perform pg_temp.act(c_mgr, e_mgr);
+    q := pg_temp.ex(q, 'manager (active, password changed) can call', pg_temp.msg(pg_temp.s_list(c_pa)), 'ok');
+    perform pg_temp.reset_actor();
+    update public.profiles set active = false where id = c_mgr;
+    q := pg_temp.refused(q, 'manager deactivated mid-session', c_mgr, e_mgr, 'authenticated', c_pa, c_nonm);
+    perform pg_temp.reset_actor();
+    update public.profiles set active = true, must_change_password = true where id = c_mgr;
+    q := pg_temp.refused(q, 'manager whose password was reset (must change)', c_mgr, e_mgr, 'authenticated', c_pa, c_nonm);
+
+    -- nothing was written by any refused call
+    perform pg_temp.reset_actor();
+    q := pg_temp.ex(q, 'refused calls changed nothing (nonmember is still exactly the manager of A it was made in the chain test)',
+                    pg_temp.val(format('select string_agg(project_id::text || '':'' || role, '','') from public.project_members where user_id = %L', c_nonm)), c_pa::text || ':manager');
+
+    -- ================= 6. database-level facts =================
+    q := pg_temp.ex(q, 'constraint: role owner is rejected (23514)',
+                    pg_temp.dml(format('update public.project_members set role = ''owner'' where project_id = %L and user_id = %L', c_pa, c_view)), 'err:23514');
+    q := pg_temp.ex(q, 'constraint: role Manager (wrong case) is rejected (23514)',
+                    pg_temp.dml(format('update public.project_members set role = ''Manager'' where project_id = %L and user_id = %L', c_pa, c_view)), 'err:23514');
+    q := pg_temp.ex(q, 'constraint: role manager is accepted',
+                    pg_temp.dml(format('update public.project_members set role = ''manager'' where project_id = %L and user_id = %L', c_pa, c_view)), 'rows:1');
+    q := pg_temp.ex(q, 'privileges: the 5 manager functions are SECURITY DEFINER with search_path = public',
+      (select count(*)::text from pg_proc p
+        where p.oid in ('public.is_project_manager(uuid)'::regprocedure, 'public.list_project_members(uuid)'::regprocedure,
+                        'public.find_user_for_project(uuid,text)'::regprocedure, 'public.set_project_member(uuid,uuid,text)'::regprocedure,
+                        'public.remove_project_member(uuid,uuid)'::regprocedure)
+          and p.prosecdef and 'search_path=public' = any (p.proconfig)), '5');
+    q := pg_temp.ex(q, 'privileges: anon cannot EXECUTE any of them, authenticated can',
+      (select (not bool_or(has_function_privilege('anon', f, 'execute')) and bool_and(has_function_privilege('authenticated', f, 'execute')))::text
+         from unnest(array['public.is_project_manager(uuid)'::regprocedure, 'public.list_project_members(uuid)'::regprocedure,
+                           'public.find_user_for_project(uuid,text)'::regprocedure, 'public.set_project_member(uuid,uuid,text)'::regprocedure,
+                           'public.remove_project_member(uuid,uuid)'::regprocedure]) as f), 'true');
+
+    raise exception 'rollback mgr tests' using errcode = 'TC001';
+  exception when sqlstate 'TC001' then
+    null;
+  end;
+  return q;
+end
+$fn$;
+
+-- ---------------------------------------------------------------------------
 -- main run
 -- ---------------------------------------------------------------------------
 do $run$
@@ -821,6 +1175,7 @@ declare
   c_inac  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000007';
   c_temp  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000008';   -- holds an admin-issued TEMPORARY password
   c_adm2  constant uuid := 'aaaaaaaa-0000-4000-8000-000000000009';   -- second admin (last-admin tests only; created inside a sub-block)
+  c_mgr   constant uuid := 'aaaaaaaa-0000-4000-8000-00000000000a';   -- MANAGER of project A (project_members.role = 'manager')
   e_admin constant text := 'tcmtest.admin@example.invalid';
   e_exec  constant text := 'tcmtest.exec@example.invalid';
   e_edit  constant text := 'tcmtest.editor@example.invalid';
@@ -830,6 +1185,7 @@ declare
   e_inac  constant text := 'tcmtest.inactive@example.invalid';
   e_temp  constant text := 'tcmtest.mustchange@example.invalid';
   e_adm2  constant text := 'tcmtest.admin2@example.invalid';
+  e_mgr   constant text := 'tcmtest.manager@example.invalid';
   c_pa    constant uuid := 'bbbbbbbb-0000-4000-8000-00000000000a';
   c_pb    constant uuid := 'bbbbbbbb-0000-4000-8000-00000000000b';
   c_file  constant uuid := 'cccccccc-0000-4000-8000-0000000000a2';   -- file created by the audit tests
@@ -843,12 +1199,17 @@ begin
   if to_regprocedure('public.is_admin()') is null or to_regclass('public.profiles') is null then
     raise exception 'auth-01-foundation.sql has not been run yet.';
   end if;
+  if not exists (select 1 from pg_constraint
+                 where conrelid = 'public.project_members'::regclass and conname = 'project_members_role_chk'
+                   and pg_get_constraintdef(oid) ~ '''manager''') then
+    raise exception 'project_members_role_chk does not allow manager: run the CURRENT auth-01-foundation.sql (or auth-04-project-managers.sql) first.';
+  end if;
 
   -- ---------- seed (as the editor's own role, RLS bypassed) ----------
   if to_regclass('public.allowed_emails') is not null then
     -- old signup whitelist trigger on auth.users would reject unknown emails
     insert into public.allowed_emails (email)
-    select e from unnest(array[e_admin, e_exec, e_edit, e_view, e_nonm, e_nopr, e_inac, e_temp, e_adm2]) as e
+    select e from unnest(array[e_admin, e_exec, e_edit, e_view, e_nonm, e_nopr, e_inac, e_temp, e_adm2, e_mgr]) as e
     on conflict do nothing;
   end if;
 
@@ -861,7 +1222,8 @@ begin
       (c_nonm,  'authenticated', 'authenticated', e_nonm),
       (c_nopr,  'authenticated', 'authenticated', e_nopr),
       (c_inac,  'authenticated', 'authenticated', e_inac),
-      (c_temp,  'authenticated', 'authenticated', e_temp);
+      (c_temp,  'authenticated', 'authenticated', e_temp),
+      (c_mgr,   'authenticated', 'authenticated', e_mgr);
     -- the temporary password hash the admin API would have created
     update auth.users set encrypted_password = 'tcmtest-temp-hash' where id = c_temp;
   exception when others then
@@ -883,7 +1245,8 @@ begin
     (c_edit,  e_edit,  'T editor',    'user',  true,  false),
     (c_view,  e_view,  'T viewer',    'user',  true,  false),
     (c_nonm,  e_nonm,  'T nonmember', 'user',  true,  false),
-    (c_inac,  e_inac,  'T inactive',  'user',  false, false);
+    (c_inac,  e_inac,  'T inactive',  'user',  false, false),
+    (c_mgr,   e_mgr,   'T manager',   'user',  true,  false);
   -- temp-password holder: explicit marker (the BEFORE INSERT trigger would compute the same value)
   insert into public.profiles (id, email, full_name, role, active, must_change_password, pw_marker) values
     (c_temp,  e_temp,  'T mustchange', 'user', true,  true, public._pw_fingerprint('tcmtest-temp-hash'));
@@ -897,7 +1260,8 @@ begin
     (c_pa, c_edit, 'editor'),
     (c_pa, c_view, 'viewer'),
     (c_pa, c_inac, 'editor'),
-    (c_pa, c_temp, 'editor');
+    (c_pa, c_temp, 'editor'),
+    (c_pa, c_mgr,  'manager');
 
   insert into public.files (id, project_id, name, type, base_name, size, ext, storage_path, is_latest) values
     ('cccccccc-0000-4000-8000-0000000000a1', c_pa, 't-a.pdf', 'other', 't-a', 1, 'pdf', 'test-a', true),
@@ -929,7 +1293,7 @@ begin
   -- guarantees the admin has something to read even if seeding ran with triggers off
   insert into public.audit_log (user_email, action, table_name, details)
   values ('service', 'tcmtest', 'seed', '{}'::jsonb);
-  raise notice 'seeded 8 synthetic users (via %), 2 projects', v_mode;
+  raise notice 'seeded 9 synthetic users (via %), 2 projects', v_mode;
 
   -- ---------- is auth-02 in force? ----------
   v_enf := exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'files' and policyname = 'files_select')
@@ -951,7 +1315,11 @@ begin
   perform pg_temp.flush(pg_temp.suite('noprofile', c_nopr,  e_nopr,  v_enf));
   perform pg_temp.flush(pg_temp.suite('inactive',  c_inac,  e_inac,  v_enf));
   perform pg_temp.flush(pg_temp.suite('mustchange', c_temp, e_temp,  v_enf));   -- editor of A, but password change pending
+  perform pg_temp.flush(pg_temp.suite('manager',   c_mgr,   e_mgr,   v_enf));   -- manager of A: editor of A + nothing else on the data tables
   perform pg_temp.flush(pg_temp.suite('anon',      null,    null,    v_enf));
+
+  -- ---------- PROJECT MANAGERS: the RPCs of auth-04 (SKIP when auth-04 has not been run) ----------
+  perform pg_temp.flush(pg_temp.mgr_tests(v_enf));
 
   -- ---------- helper functions: who may EXECUTE what (privilege catalogue, not role simulation) ----------
   perform pg_temp.chk('privileges: anon cannot EXECUTE any helper / profile function',

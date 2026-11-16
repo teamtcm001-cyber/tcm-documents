@@ -20,6 +20,8 @@
 --     [x] every real person has an auth user + profiles row (admin UI), and
 --         user-role people have project_members rows (admin UI)
 --     [x] scripts/auth-test.sql was run after 01 and showed no FAIL
+--     (afterwards: scripts/auth-04-project-managers.sql for project managers - it can be run
+--      before or after this file; this file re-states the grants of its functions if present)
 --   Then run auth-test.sql AGAIN: every check must now be PASS (none SKIP).
 --   If people are locked out: scripts/auth-03-rollback.sql (it is safe to keep a tab
 --   open with it ready).
@@ -45,8 +47,13 @@
 -- ACCESS MODEL (implemented by can_view_project / can_edit_project from 01)
 --   admin  : everything, incl. create/delete projects, manage profiles + membership
 --   exec   : read ALL projects and children; no writes anywhere
---   user   : read projects where they have a membership row (editor or viewer);
---            write only where role = 'editor'; cannot create/delete projects
+--   user   : read projects where they have a membership row (editor, viewer or manager);
+--            write only where role = 'editor' or 'manager'; cannot create/delete projects
+--   manager: (project_members.role = 'manager', see auth-04) an editor of that project who can
+--            also add/remove/change its people through the RPCs of auth-04. The policies below
+--            need NO change for that: every write policy goes through can_edit_project(),
+--            which treats 'manager' as editor; project_members itself stays admin-write-only
+--            (managers use the SECURITY DEFINER RPCs, never the table).
 --   no active profile (shared account, deactivated person): nothing at all
 --
 -- POLICIES CREATED (all TO authenticated; anon has none)
@@ -106,6 +113,20 @@ begin
   if not exists (select 1 from information_schema.columns
                  where table_schema = 'public' and table_name = 'profiles' and column_name = 'pw_marker') then
     raise exception 'column profiles.pw_marker is missing. Run the CURRENT scripts/auth-01-foundation.sql first.';
+  end if;
+
+  -- project managers (auth-04): the CURRENT auth-01 must be in place - its can_edit_project() and
+  -- role CHECK know 'manager'. Refuse to enforce on top of an older copy (a manager would be a viewer).
+  if (select prosrc from pg_proc where oid = 'public.can_edit_project(uuid)'::regprocedure) !~ '''manager''' then
+    raise exception 'public.can_edit_project(uuid) does not know the manager role. Run the CURRENT scripts/auth-01-foundation.sql (or scripts/auth-04-project-managers.sql) first.';
+  end if;
+  if not exists (select 1 from pg_constraint
+                 where conrelid = 'public.project_members'::regclass and conname = 'project_members_role_chk'
+                   and pg_get_constraintdef(oid) ~ '''manager''') then
+    raise exception 'project_members_role_chk does not allow manager. Run the CURRENT scripts/auth-01-foundation.sql first.';
+  end if;
+  if to_regprocedure('public.set_project_member(uuid,uuid,text)') is null then
+    raise notice 'auth-04 (project managers) is not installed yet: run scripts/auth-04-project-managers.sql after this file. Until then the manager role works for editing but nobody can manage members except admins.';
   end if;
 
   -- only admins who can really work count: active AND no temporary password pending
@@ -470,6 +491,20 @@ begin
   loop
     if to_regprocedure(f) is not null then
       execute format('revoke all on function %s from public, anon', f);
+    end if;
+  end loop;
+
+  -- project managers (auth-04), only when installed: signed-in users only (the functions
+  -- themselves refuse everybody who is not an admin / manager of the project)
+  foreach f in array array[
+    'public.is_project_manager(uuid)','public.list_project_members(uuid)',
+    'public.find_user_for_project(uuid,text)','public.set_project_member(uuid,uuid,text)',
+    'public.remove_project_member(uuid,uuid)'
+  ]
+  loop
+    if to_regprocedure(f) is not null then
+      execute format('revoke all on function %s from public, anon', f);
+      execute format('grant execute on function %s to authenticated', f);
     end if;
   end loop;
 end

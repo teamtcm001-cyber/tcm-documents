@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import {
@@ -9,7 +9,8 @@ import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLO
 import { extractTextFromBlobDetailed, RESULT } from '../utils/textExtract.js'
 import PreviewModal from './PreviewModal.jsx'
 import Dialog from './ui/Dialog.jsx'
-import { ReadOnlyBadge } from './AccessBits.jsx'
+import { ReadOnlyBadge, ManagerBadge } from './AccessBits.jsx'
+import ProjectMembersPanel from './ProjectMembersPanel.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { CoContact } from './TrackingBits.jsx'
 
@@ -62,8 +63,14 @@ function FileRow({ file, canEdit, onDelete, onDownload, onPreview }) {
 }
 
 export default function ProjectDrawer({ project, refreshKey, onClose, onChanged, onOpenTracking, onStatusChanged }) {
-  const { canEditProject, canDeleteProject } = useAuth()
+  const { canEditProject, canDeleteProject, canManageProject, isAdmin } = useAuth()
   const canEdit = canEditProject(project?.id)
+  // "สมาชิกโครงการ" tab: the project's managers and admins only (the RPCs enforce it as well)
+  const canManage = canManageProject(project?.id)
+  const [tab, setTab] = useState('docs') // 'docs' | 'members'
+  const tabsId = useId()
+  const tabRefs = { docs: useRef(null), members: useRef(null) }
+  const activeTab = canManage ? tab : 'docs' // the tab disappears (back to documents) if the manager role is lost
   const [statusSaving, setStatusSaving] = useState(false)
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
@@ -80,6 +87,17 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
     if (!project) return
     load()
   }, [project, refreshKey])
+
+  useEffect(() => setTab('docs'), [project?.id])
+
+  // arrow keys move between the two tabs (WAI-ARIA tabs pattern)
+  const onTabKey = (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return
+    e.preventDefault()
+    const next = e.key === 'ArrowLeft' || e.key === 'Home' ? 'docs' : 'members'
+    setTab(next)
+    tabRefs[next].current?.focus()
+  }
 
   const load = async () => {
     setLoading(true)
@@ -309,6 +327,11 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
               <ReadOnlyBadge className="on-dark" />
             </div>
           )}
+          {canManage && !isAdmin && (
+            <div style={{ marginTop: 10 }}>
+              <ManagerBadge className="on-dark" />
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn btn-sm btn-primary" onClick={() => toast('Zip ทั้งโครงการ ยังไม่รองรับ', 'err')}>
               <Icon name="zip" size={13} /> Zip ทั้งโครงการ
@@ -362,82 +385,122 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
           </div>
         </div>
 
-        <div className="drawer-tools">
-          <div className="drawer-search">
-            <Icon name="search" size={15} style={{ color: 'var(--gray-500)' }} />
-            <input
-              placeholder="ค้นหาในเอกสาร..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <button
-            className={`filter-chip ${showLatestOnly ? 'on' : ''}`}
-            onClick={() => setShowLatestOnly((s) => !s)}
-            title="แสดง Version ล่าสุดเท่านั้น"
-          >
-            <Icon name="bolt" size={11} /> ล่าสุด
-          </button>
-        </div>
-
-        <div className="drawer-tools" style={{ borderTop: 0, paddingTop: 0, flexWrap: 'wrap' }}>
-          {types.map((t) => (
-            <button key={t} className={`filter-chip ${filter === t ? 'on' : ''}`} onClick={() => setFilter(t)}>
-              {t === 'all' ? 'ทั้งหมด' : TYPE_LABEL[t] || t}
+        {canManage && (
+          <div className="drawer-tabs" role="tablist" aria-label="ส่วนของโครงการ" onKeyDown={onTabKey}>
+            <button
+              type="button"
+              role="tab"
+              id={`${tabsId}-docs`}
+              aria-selected={activeTab === 'docs'}
+              aria-controls={`${tabsId}-panel`}
+              tabIndex={activeTab === 'docs' ? 0 : -1}
+              ref={tabRefs.docs}
+              className="drawer-tab"
+              onClick={() => setTab('docs')}
+            >
+              <Icon name="file" size={14} /> เอกสาร
             </button>
-          ))}
-        </div>
+            <button
+              type="button"
+              role="tab"
+              id={`${tabsId}-members`}
+              aria-selected={activeTab === 'members'}
+              aria-controls={`${tabsId}-panel`}
+              tabIndex={activeTab === 'members' ? 0 : -1}
+              ref={tabRefs.members}
+              className="drawer-tab"
+              onClick={() => setTab('members')}
+              data-testid="tab-members"
+            >
+              <Icon name="users" size={14} /> สมาชิกโครงการ
+            </button>
+          </div>
+        )}
 
-        <div className="drawer-body">
-          {loading ? (
-            <div style={{ display: 'grid', placeItems: 'center', padding: 40 }}>
-              <div className="spinner"></div>
-            </div>
-          ) : filteredKeys.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-500)' }}>
-              <Icon name="file" size={28} />
-              <div style={{ marginTop: 8 }}>
-                {files.length === 0 ? 'ยังไม่มีเอกสารในโครงการนี้' : 'ไม่พบเอกสารที่ตรงกับเงื่อนไข'}
+        {activeTab === 'members' ? (
+          <div className="drawer-body" role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-members`}>
+            <ProjectMembersPanel project={project} />
+          </div>
+        ) : (
+          <>
+            <div className="drawer-tools">
+              <div className="drawer-search">
+                <Icon name="search" size={15} style={{ color: 'var(--gray-500)' }} />
+                <input
+                  placeholder="ค้นหาในเอกสาร..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
               </div>
+              <button
+                className={`filter-chip ${showLatestOnly ? 'on' : ''}`}
+                onClick={() => setShowLatestOnly((s) => !s)}
+                title="แสดง Version ล่าสุดเท่านั้น"
+              >
+                <Icon name="bolt" size={11} /> ล่าสุด
+              </button>
             </div>
-          ) : (
-            filteredKeys.map((k) => {
-              const grp = groups[k]
-              const [type, baseName] = k.split('|')
-              const shown = showLatestOnly ? grp.slice(0, 1) : grp
-              return (
-                <div className="version-group" key={k}>
-                  <div className="vg-head">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span
-                        className="badge"
-                        style={{ padding: '3px 10px', background: TYPE_BG[type], color: TYPE_TEXT[type] }}
-                      >
-                        {TYPE_LABEL[type] || type}
-                      </span>
-                      <span style={{ fontFamily: 'Prompt' }}>{baseName}</span>
-                    </div>
-                    <span style={{ color: 'var(--gray-500)', fontSize: 12 }}>
-                      {grp.length} version{grp.length > 1 ? 's' : ''}
-                    </span>
-                  </div>
-                  <div className="vg-body">
-                    {shown.map((f) => (
-                      <FileRow
-                        key={f.id}
-                        file={f}
-                        canEdit={canEdit}
-                        onDelete={handleDelete}
-                        onDownload={handleDownload}
-                        onPreview={setPreviewFile}
-                      />
-                    ))}
+
+            <div className="drawer-tools" style={{ borderTop: 0, paddingTop: 0, flexWrap: 'wrap' }}>
+              {types.map((t) => (
+                <button key={t} className={`filter-chip ${filter === t ? 'on' : ''}`} onClick={() => setFilter(t)}>
+                  {t === 'all' ? 'ทั้งหมด' : TYPE_LABEL[t] || t}
+                </button>
+              ))}
+            </div>
+
+            <div className="drawer-body" {...(canManage ? { role: 'tabpanel', id: `${tabsId}-panel`, 'aria-labelledby': `${tabsId}-docs` } : {})}>
+              {loading ? (
+                <div style={{ display: 'grid', placeItems: 'center', padding: 40 }}>
+                  <div className="spinner"></div>
+                </div>
+              ) : filteredKeys.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 40, color: 'var(--gray-500)' }}>
+                  <Icon name="file" size={28} />
+                  <div style={{ marginTop: 8 }}>
+                    {files.length === 0 ? 'ยังไม่มีเอกสารในโครงการนี้' : 'ไม่พบเอกสารที่ตรงกับเงื่อนไข'}
                   </div>
                 </div>
-              )
-            })
-          )}
-        </div>
+              ) : (
+                filteredKeys.map((k) => {
+                  const grp = groups[k]
+                  const [type, baseName] = k.split('|')
+                  const shown = showLatestOnly ? grp.slice(0, 1) : grp
+                  return (
+                    <div className="version-group" key={k}>
+                      <div className="vg-head">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span
+                            className="badge"
+                            style={{ padding: '3px 10px', background: TYPE_BG[type], color: TYPE_TEXT[type] }}
+                          >
+                            {TYPE_LABEL[type] || type}
+                          </span>
+                          <span style={{ fontFamily: 'Prompt' }}>{baseName}</span>
+                        </div>
+                        <span style={{ color: 'var(--gray-500)', fontSize: 12 }}>
+                          {grp.length} version{grp.length > 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <div className="vg-body">
+                        {shown.map((f) => (
+                          <FileRow
+                            key={f.id}
+                            file={f}
+                            canEdit={canEdit}
+                            onDelete={handleDelete}
+                            onDownload={handleDownload}
+                            onPreview={setPreviewFile}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       {reindexReport && (

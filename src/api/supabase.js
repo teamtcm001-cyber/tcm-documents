@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { uploadToDrive, discardDriveUpload } from '../utils/googleDrive.js';
+import { MEMBER_ROLES } from '../utils/roles.js';
 import {
   todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, ALL_STATUSES, CLEARS_BILLED_DATE,
   phoneError, normalizePhones, PROJECT_STATUSES,
@@ -313,7 +314,7 @@ function requireAffected(data) {
 }
 
 // ---- project membership (who may see / edit which project) ----
-// { [project_id]: 'editor' | 'viewer' } for the signed-in person (own rows; RLS pm_select_own).
+// { [project_id]: 'manager' | 'editor' | 'viewer' } for the signed-in person (own rows; RLS pm_select_own).
 // userId is required because an exec (and an admin) can read other people's rows too.
 export async function fetchMyMemberships(userId) {
   const { data, error } = await supabase.from('project_members').select('project_id, role').eq('user_id', userId);
@@ -321,6 +322,121 @@ export async function fetchMyMemberships(userId) {
   const out = {};
   for (const r of data || []) out[r.project_id] = r.role;
   return out;
+}
+
+// ---- people of ONE project, managed by that project's managers (and admins) ----
+// RPCs of scripts/auth-04-project-managers.sql (SECURITY DEFINER; they check the caller themselves):
+//   list_project_members(p_project)            -> [{ user_id, email, full_name, role, active }]
+//   find_user_for_project(p_project, p_email)  -> 0 or 1 row { user_id, email, full_name, member_role }
+//   set_project_member(p_project, p_user, p_role) / remove_project_member(p_project, p_user) -> void
+// Errors arrive as PostgREST errors: `code` = SQLSTATE, `message` starts with a keyword
+// (FORBIDDEN, SELF_CHANGE_FORBIDDEN, TARGET_NOT_ELIGIBLE, PROJECT_NOT_FOUND; 22023 = invalid role).
+export const MEMBER_NOT_FOUND_MESSAGE =
+  'ไม่พบบัญชีผู้ใช้นี้ที่เพิ่มเข้าโครงการได้ (ต้องเป็นบัญชีที่มีอยู่และใช้งานอยู่ — ถ้ายังไม่มีบัญชี ให้ติดต่อ Admin)';
+export const SELF_CHANGE_MESSAGE = 'ไม่สามารถแก้ไขหรือลบสิทธิ์ของตัวเองได้';
+export const MEMBER_FORBIDDEN_MESSAGE = 'คุณไม่มีสิทธิ์จัดการสมาชิกของโครงการนี้ (หรือสิทธิ์ของคุณถูกเปลี่ยนไปแล้ว) — กรุณารีเฟรช';
+export const MAX_EMAIL_LENGTH = 254;
+const MEMBER_RANK = Object.fromEntries(MEMBER_ROLES.map((r, i) => [r, i]));
+
+// Maps a failed member RPC to an AppError (Thai) and tells the app when the session / the caller's access is stale.
+function memberRpcError(error, status) {
+  const code = String(error?.code || '');
+  const msg = String(error?.message || '');
+  const http = typeof status === 'number' ? status : error?.status;
+  // Mapped on error.code / error.message (the keyword), NEVER on the HTTP status: real PostgREST may answer P0002 with
+  // 500 and 42501 with 401 or 403. The status is only a last resort for transient trouble.
+  // SELF_CHANGE_FORBIDDEN also contains "FORBIDDEN": test it first
+  if (/SELF_CHANGE_FORBIDDEN/.test(msg)) return new AppError(SELF_CHANGE_MESSAGE, 'self_change');
+  if (/FORBIDDEN/.test(msg)) {
+    reportAuthProblem('denied'); // the person's idea of their access is stale: AuthContext re-reads memberships
+    return new AppError(MEMBER_FORBIDDEN_MESSAGE, 'forbidden');
+  }
+  if (/PROJECT_NOT_FOUND/.test(msg)) return new AppError('ไม่พบโครงการนี้ (อาจถูกลบไปแล้ว) — กรุณารีเฟรช', 'project_not_found');
+  // 23503 = foreign-key race: the account was deleted between the lookup and the write
+  if (/TARGET_NOT_ELIGIBLE/.test(msg) || code === 'P0002' || code === '23503') {
+    return new AppError('เพิ่มบัญชีนี้เข้าโครงการไม่ได้ (บัญชีต้องมีอยู่ ใช้งานอยู่ และไม่ใช่แอดมิน/ผู้บริหาร)', 'target_not_eligible');
+  }
+  if (code === '22023' || /INVALID_ROLE/.test(msg)) return new AppError('สิทธิ์ที่เลือกไม่ถูกต้อง', 'bad_request');
+  if (isJwtError(error) || (code === '42501' && http === 401)) {
+    // bad / expired token, or no token at all (anon has no EXECUTE on the functions)
+    reportAuthProblem('expired');
+    return new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+  }
+  if (code === '42501' || /permission denied/i.test(msg)) {
+    reportAuthProblem('denied');
+    return new AppError(MEMBER_FORBIDDEN_MESSAGE, 'forbidden');
+  }
+  if (code === 'PGRST202') {
+    return new AppError('ฟีเจอร์จัดการสมาชิกโครงการยังไม่พร้อมใช้งานบนระบบ — ติดต่อ Admin', 'not_available');
+  }
+  if (http === 401) {
+    reportAuthProblem('expired');
+    return new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+  }
+  if (http === 503 || code === 'PGRST002') return new AppError(UNAVAILABLE_MESSAGE, 'auth_unavailable');
+  if (http === 429) return new AppError(RATE_LIMITED_MESSAGE, 'rate_limited');
+  if (isNetworkError(error)) return new AppError('เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่อีกครั้ง', 'network');
+  if (typeof http === 'number' && http >= 500) return new AppError('ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง', 'error');
+  return new AppError('ดำเนินการไม่สำเร็จ กรุณาลองใหม่อีกครั้ง', 'error');
+}
+
+async function memberRpc(fn, args) {
+  let res;
+  try {
+    res = await supabase.rpc(fn, args);
+  } catch {
+    throw new AppError('เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่อีกครั้ง', 'network');
+  }
+  if (res.error) throw memberRpcError(res.error, res.status);
+  return res.data;
+}
+
+// [{ userId, email, fullName, role, active }] sorted manager -> editor -> viewer, then by name.
+export async function listProjectMembers(projectId) {
+  if (!projectId) throw new AppError('ไม่พบโครงการ', 'not_found');
+  const data = await memberRpc('list_project_members', { p_project: projectId });
+  const rank = (r) => (r in MEMBER_RANK ? MEMBER_RANK[r] : 9);
+  return (Array.isArray(data) ? data : [])
+    .map((r) => ({
+      userId: r.user_id,
+      email: r.email || '',
+      fullName: r.full_name || '',
+      role: r.role,
+      active: r.active !== false,
+    }))
+    .sort((a, b) => rank(a.role) - rank(b.role) || (a.fullName || a.email).localeCompare(b.fullName || b.email, 'th'));
+}
+
+// Exact-email lookup of an addable account -> { userId, email, fullName, memberRole|null } or null (= not found OR
+// not addable: the server never says which). Nothing is browsable: only the full address finds a person.
+export async function findUserForProject(projectId, email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!projectId) throw new AppError('ไม่พบโครงการ', 'not_found');
+  if (!e) throw new AppError('กรุณากรอกอีเมลของผู้ที่ต้องการเพิ่ม', 'invalid_email');
+  if (e.length > MAX_EMAIL_LENGTH) throw new AppError('อีเมลยาวเกินไป', 'invalid_email');
+  if (!/^[^\s@]+@[^\s@]+$/.test(e)) throw new AppError('รูปแบบอีเมลไม่ถูกต้อง — กรอกอีเมลเต็ม เช่น name@company.com', 'invalid_email');
+  const data = await memberRpc('find_user_for_project', { p_project: projectId, p_email: e });
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || !row.user_id) return null;
+  return {
+    userId: row.user_id,
+    email: row.email || e,
+    fullName: row.full_name || '',
+    memberRole: row.member_role || null,
+  };
+}
+
+// role: 'manager' | 'editor' | 'viewer'. Adds the person or changes their role.
+export async function setProjectMember(projectId, userId, role) {
+  if (!projectId || !userId) throw new AppError('ไม่พบข้อมูลผู้ใช้หรือโครงการ', 'not_found');
+  if (!MEMBER_ROLES.includes(role)) throw new AppError('สิทธิ์ที่เลือกไม่ถูกต้อง', 'bad_request');
+  await memberRpc('set_project_member', { p_project: projectId, p_user: userId, p_role: role });
+  return role;
+}
+
+export async function removeProjectMember(projectId, userId) {
+  if (!projectId || !userId) throw new AppError('ไม่พบข้อมูลผู้ใช้หรือโครงการ', 'not_found');
+  await memberRpc('remove_project_member', { p_project: projectId, p_user: userId });
 }
 
 // ---- admin console data (admin only; RLS + /api/admin-users enforce it) ----
@@ -340,19 +456,30 @@ export async function fetchMemberships(userId) {
   return data || [];
 }
 
-// role: 'editor' | 'viewer' | null/'none' (= remove access). One row per (project, user).
+// role: 'manager' | 'editor' | 'viewer' | null/'none' (= remove access). One row per (project, user).
+// Admin console only (table write; RLS lets admins write project_members). The people of one project are
+// managed from the project drawer with setProjectMember / removeProjectMember below.
 export async function setMembership(projectId, userId, role) {
   if (!role || role === 'none') {
     const { error } = await supabase.from('project_members').delete().eq('project_id', projectId).eq('user_id', userId);
     if (error) throw error;
     return null;
   }
-  if (!['editor', 'viewer'].includes(role)) throw new AppError('สิทธิ์ไม่ถูกต้อง', 'bad_request');
+  if (!MEMBER_ROLES.includes(role)) throw new AppError('สิทธิ์ไม่ถูกต้อง', 'bad_request');
   const { data, error } = await supabase
     .from('project_members')
     .upsert([{ project_id: projectId, user_id: userId, role }], { onConflict: 'project_id,user_id' })
     .select();
-  if (error) throw error;
+  if (error) {
+    // auth-04 not applied yet: the old CHECK constraint refuses 'manager' (23514). Never show raw database text.
+    if (role === 'manager' && (String(error.code || '') === '23514' || /project_members_role_chk/.test(error.message || ''))) {
+      throw new AppError(
+        'ยังบันทึกบทบาทผู้ดูแลโครงการไม่ได้ — ต้องให้ผู้ดูแลระบบรันสคริปต์ auth-04 บนฐานข้อมูลก่อน',
+        'not_available'
+      );
+    }
+    throw error;
+  }
   if (!data || data.length === 0) throw new AppError('บันทึกสิทธิ์ไม่สำเร็จ (ไม่มีสิทธิ์ดำเนินการ)', 'forbidden');
   return role;
 }

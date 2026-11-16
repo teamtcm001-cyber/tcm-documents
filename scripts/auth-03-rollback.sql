@@ -57,6 +57,9 @@
 --              were not inspected). It restores "the old app works", not the exact old state.
 --     'admin_only' same policies as 'repo' but gated on public.is_admin() ONLY (the shared
 --              account is NOT re-admitted; the old shared-account app does not work).
+--     'none'   touches NO policy and NO grant: use it (with an undo_* switch below set to 'YES') when you
+--              only want to remove an add-on - e.g. the project-manager feature - and keep the
+--              auth-02 policies exactly as they are. The shared account is not re-admitted.
 --     'backup' the EXACT restore: replays the ORIGINAL policies saved by auth-02 in
 --              public._policy_backup_<date> (the OLDEST backup table is used), whatever they
 --              were - including a plain `using (true)` if that is what they were. With this
@@ -65,7 +68,8 @@
 --
 -- WHAT IT DOES NOT TOUCH (they remain, by design)
 --   public.profiles, public.project_members and public.audit_log with their policies;
---   the helper functions; the audit triggers (audit_log keeps recording); the
+--   the helper functions (the project-manager functions of auth-04 too, unless
+--   undo_project_managers = 'YES'); the audit triggers (audit_log keeps recording); the
 --   _policy_backup_* / _grant_backup_* tables; security_invoker on the views;
 --   anon stays without access.
 --
@@ -81,7 +85,7 @@ begin;
 set local lock_timeout = '10s';
 
 -- >>> EDIT HERE <<<
---   mode                'repo' (default) | 'backup' | 'admin_only'
+--   mode                'repo' (default) | 'backup' | 'admin_only' | 'none' (no policy / grant change at all)
 --   accept_shared_risk  must be exactly  I-ACCEPT-THE-RISK  for 'repo' / 'backup' (see the warning
 --                       at the top: they re-admit public@teamcm.co.th whose password is public)
 --   undo_hardening      'NO' (default) | 'YES' - also remove the objects auth-01 added later
@@ -89,18 +93,32 @@ set local lock_timeout = '10s';
 --                       begin_password_reset / revoke_user_sessions, uploader guard, files_storage_path_uq). Only for going back to the
 --                       OLD app; the new admin API calls those functions. The must-change-password
 --                       gate inside the helper functions is NOT undone (see section 4).
+--   undo_project_managers 'NO' (default) | 'YES' - remove the project-manager feature (auth-04):
+--                       every project_members.role = 'manager' becomes 'editor' (the list is first
+--                       saved in public._project_managers_backup), the functions is_project_manager /
+--                       list_project_members / find_user_for_project / set_project_member /
+--                       remove_project_member are dropped and the role CHECK goes back to
+--                       ('editor','viewer'). Independent of the two options above. To remove ONLY the
+--                       manager feature use  mode 'none'  +  undo_project_managers 'YES'  (the policies of
+--                       auth-02 stay as they are). To bring the feature back: run auth-04 again
+--                       (auth-01 / auth-02 may be re-run in any order as well); the backup table says
+--                       who was a manager: see the comment at the end of section 5.
 create temp table _tcm_rollback_mode on commit drop as
   select 'repo'::text as mode,
          'NO'::text   as accept_shared_risk,
-         'NO'::text   as undo_hardening;
+         'NO'::text   as undo_hardening,
+         'NO'::text   as undo_project_managers;
 
 do $guard$
 declare
   m record;
 begin
   select * into m from _tcm_rollback_mode;
-  if m.mode not in ('repo','backup','admin_only') then
-    raise exception 'mode must be repo, backup or admin_only (got %)', m.mode;
+  if m.mode not in ('repo','backup','admin_only','none') then
+    raise exception 'mode must be repo, backup, admin_only or none (got %)', m.mode;
+  end if;
+  if m.undo_hardening not in ('YES','NO') or m.undo_project_managers not in ('YES','NO') then
+    raise exception 'undo_hardening / undo_project_managers must be YES or NO';
   end if;
   if m.mode in ('repo','backup') and m.accept_shared_risk <> 'I-ACCEPT-THE-RISK' then
     raise exception E'REFUSED: mode "%" would re-admit the old shared account public@teamcm.co.th, whose password is compiled into the old public JavaScript bundle (= anyone can sign in).\n  Safer: set mode to ''admin_only'' (admins only; the old shared-account app will not work).\n  If you really must bring the old app back: first make sure nobody else can sign up (Dashboard -> Authentication), edit accept_shared_risk to I-ACCEPT-THE-RISK, run again, and disable/rotate that account as soon as possible.', m.mode;
@@ -119,6 +137,10 @@ declare
   r record;
   n int := 0;
 begin
+  if (select mode from _tcm_rollback_mode) = 'none' then
+    raise notice 'mode none: policies and grants are left untouched.';
+    return;
+  end if;
   for r in
     select schemaname, tablename, policyname
     from pg_policies
@@ -263,6 +285,9 @@ do $grants$
 declare
   r record;
 begin
+  if (select mode from _tcm_rollback_mode) = 'none' then
+    return;
+  end if;
   for r in
     select * from (values
       ('projects',                    'select, insert, update, delete'),
@@ -338,9 +363,75 @@ begin
 end
 $undo$;
 
+-- ----------------------------------------------------------------------------
+-- 5. undo_project_managers = 'YES': remove the project-manager feature (auth-04).
+--    Order matters: managers are first LISTED in public._project_managers_backup (admin-only,
+--    never readable by clients), then turned into editors (they keep their edit rights, lose the
+--    right to manage people; the change is written to audit_log by the membership trigger), then
+--    the functions are dropped, then the role CHECK is narrowed again (it would fail while a
+--    'manager' row exists, hence the conversion first).
+--    can_edit_project() is NOT reverted: its 'editor','manager' list is harmless without manager
+--    rows and auth-01 / auth-02 insist on it, so they can be re-run safely afterwards.
+--    To restore the managers later (after re-running auth-04) - ONLY the rows of the LATEST undo run
+--    (every run stamps its rows with the same undone_at = the transaction time), so a second undo can
+--    never re-promote somebody who was deliberately demoted in between:
+--      update public.project_members m set role = 'manager'
+--        from public._project_managers_backup b
+--       where b.project_id = m.project_id and b.user_id = m.user_id and m.role = 'editor'
+--         and b.undone_at = (select max(undone_at) from public._project_managers_backup);
+-- ----------------------------------------------------------------------------
+do $undopm$
+declare
+  n_conv bigint;
+  c      record;
+begin
+  if (select undo_project_managers from _tcm_rollback_mode) <> 'YES' then
+    raise notice 'undo_project_managers = NO: project-manager role and functions are kept.';
+    return;
+  end if;
+
+  if to_regclass('public._project_managers_backup') is null then
+    create table public._project_managers_backup (
+      undone_at  timestamptz not null default now(),
+      project_id uuid        not null,
+      user_id    uuid        not null
+    );
+  end if;
+  alter table public._project_managers_backup enable row level security;
+  revoke all on public._project_managers_backup from public, anon, authenticated;
+
+  insert into public._project_managers_backup (project_id, user_id)
+  select m.project_id, m.user_id from public.project_members m where m.role = 'manager';
+
+  update public.project_members set role = 'editor' where role = 'manager';
+  get diagnostics n_conv = row_count;
+
+  drop function if exists public.set_project_member(uuid, uuid, text);
+  drop function if exists public.remove_project_member(uuid, uuid);
+  drop function if exists public.find_user_for_project(uuid, text);
+  drop function if exists public.list_project_members(uuid);
+  drop function if exists public.is_project_manager(uuid);
+
+  for c in
+    select conname from pg_constraint
+    where conrelid = 'public.project_members'::regclass and contype = 'c'
+      and pg_get_constraintdef(oid) ~* '\mrole\M'
+  loop
+    execute format('alter table public.project_members drop constraint %I', c.conname);
+  end loop;
+  alter table public.project_members
+    add constraint project_members_role_chk check (role in ('editor','viewer'));
+
+  raise notice 'undo_project_managers done: % manager row(s) became editor (listed in public._project_managers_backup); functions dropped; role CHECK is (editor, viewer) again. Re-run auth-04 to bring the feature back.', n_conv;
+end
+$undopm$;
+
 commit;
 
 -- ============================================================================
 -- Verify (read-only):
 --   select tablename, policyname, cmd from pg_policies where schemaname='public' order by 1,2;
+--   after undo_project_managers = 'YES':
+--   select role, count(*) from public.project_members group by 1;           -- no 'manager'
+--   select * from public._project_managers_backup;                           -- who they were
 -- ============================================================================

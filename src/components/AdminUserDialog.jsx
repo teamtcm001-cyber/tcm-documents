@@ -14,7 +14,7 @@ import { fmtThaiDateTime } from '../utils/tracking.js'
 const ROLE_CONSEQUENCE = {
   admin: 'จะจัดการผู้ใช้และสิทธิ์ สร้าง/ลบโครงการ และเห็น-แก้ไขได้ทุกโครงการ',
   exec: 'จะเห็นทุกโครงการ แต่อ่านอย่างเดียว (แก้ไข/อัปโหลดไม่ได้) สิทธิ์รายโครงการที่เคยกำหนดจะไม่มีผล',
-  user: 'จะเห็นเฉพาะโครงการที่ได้รับสิทธิ์ (แก้ไขได้หรือดูอย่างเดียวรายโครงการ) และไม่สามารถจัดการผู้ใช้ได้',
+  user: 'จะเห็นเฉพาะโครงการที่ได้รับสิทธิ์ (ผู้ดูแลโครงการ / แก้ไขได้ / ดูอย่างเดียวรายโครงการ) และไม่สามารถจัดการบัญชีผู้ใช้ได้',
 }
 
 // Small notes for the admin when the server finished the action but a side effect did not:
@@ -34,7 +34,7 @@ export function serverNotes(res) {
 function AccessMatrix({ user, projects, onCountChange }) {
   const toast = useToast()
   const byRole = user.role === 'admin' ? 'editor' : user.role === 'exec' ? 'viewer' : null
-  const [map, setMap] = useState(null) // { [project_id]: 'editor'|'viewer' }
+  const [map, setMap] = useState(null) // { [project_id]: 'manager'|'editor'|'viewer' }
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState({}) // project_id -> true
   const savingRef = useRef({}) // synchronous guard: two quick changes send one request
@@ -98,8 +98,8 @@ function AccessMatrix({ user, projects, onCountChange }) {
   }, [projects, search])
 
   const counts = useMemo(() => {
-    const c = { editor: 0, viewer: 0, none: 0 }
-    for (const p of projects) c[map?.[p.id] || 'none'] += 1
+    const c = { manager: 0, editor: 0, viewer: 0, none: 0 }
+    for (const p of projects) c[map?.[p.id] in c ? map[p.id] : 'none'] += 1
     return c
   }, [map, projects])
 
@@ -140,7 +140,7 @@ function AccessMatrix({ user, projects, onCountChange }) {
         <>
           {!byRole && (
             <div className="adm-matrix-sum small muted" aria-live="polite">
-              แก้ไขได้ {counts.editor} · ดูอย่างเดียว {counts.viewer} · ไม่มีสิทธิ์ {counts.none} (จากทั้งหมด {projects.length} โครงการ)
+              ผู้ดูแลโครงการ {counts.manager} · แก้ไขได้ {counts.editor} · ดูอย่างเดียว {counts.viewer} · ไม่มีสิทธิ์ {counts.none} (จากทั้งหมด {projects.length} โครงการ)
             </div>
           )}
           {projects.length > 6 && (
@@ -170,6 +170,7 @@ function AccessMatrix({ user, projects, onCountChange }) {
                     <option value="none">{MEMBERSHIP_LABEL.none}</option>
                     <option value="viewer">{MEMBERSHIP_LABEL.viewer}</option>
                     <option value="editor">{MEMBERSHIP_LABEL.editor}</option>
+                    <option value="manager">{MEMBERSHIP_LABEL.manager}</option>
                   </select>
                   {saving[p.id] && <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} aria-label="กำลังบันทึก" />}
                 </div>

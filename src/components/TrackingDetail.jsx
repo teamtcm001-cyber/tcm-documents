@@ -5,7 +5,7 @@ import {
   fetchProjectTrackingRow, fetchProgressHistory, fetchInstallments, updateProjectTracking, updateProjectStatus,
 } from '../api/supabase.js'
 import { useAuth } from '../auth/AuthContext.jsx'
-import { ReadOnlyBadge } from './AccessBits.jsx'
+import { ReadOnlyBadge, ManagerBadge } from './AccessBits.jsx'
 import {
   computeHealth, fmtThaiDate, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, phoneError, normalizePhones,
   statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM,
@@ -16,7 +16,8 @@ import TrackingInstallments from './TrackingInstallments.jsx'
 
 function ProjectHeader({ row, health, canEdit, onSaved }) {
   const toast = useToast()
-  const { profile } = useAuth()
+  const { profile, canManageProject, isAdmin } = useAuth()
+  const canManage = canManageProject(row.project_id)
   // the signed-in person's own name, offered as a shortcut for the Project Co field (never recorded as "who edited")
   const myName = profile?.full_name || ''
   const [editing, setEditing] = useState(false)
@@ -145,6 +146,7 @@ function ProjectHeader({ row, health, canEdit, onSaved }) {
           </button>
         )}
         {!canEdit && <ReadOnlyBadge />}
+        {canManage && !isAdmin && <ManagerBadge />}
       </div>
 
       {health.reasons.length > 0 && (
