@@ -6,7 +6,7 @@ import { ROLES, ROLE_LABEL, ROLE_DESC } from '../utils/roles.js'
 import { fmtThaiDateTime } from '../utils/tracking.js'
 
 // Clipboard with a fallback for browsers/contexts where navigator.clipboard is unavailable.
-async function copyText(text) {
+export async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text)
     return true

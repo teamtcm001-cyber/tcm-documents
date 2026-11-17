@@ -449,6 +449,31 @@ export async function fetchAllProjectsForAdmin() {
   return data || [];
 }
 
+// Bulk import (admin only): every project with its Project Co text, and EVERY project_members row.
+export async function fetchProjectsForImport() {
+  const { data, error } = await supabase.from('projects').select('id, code, name, project_co').order('name', { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+// [{ project_id, user_id, role }] paged (PostgREST returns at most 1000 rows per request)
+export async function fetchAllMemberships() {
+  const out = [];
+  for (let from = 0; from < 200000; from += 1000) {
+    const { data, error } = await supabase
+      .from('project_members')
+      .select('project_id, user_id, role')
+      .order('project_id', { ascending: true })
+      .order('user_id', { ascending: true })
+      .range(from, from + 999);
+    if (error) throw error;
+    const rows = data || [];
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
+
 // rows of project_members for one user: [{ project_id, role }]
 export async function fetchMemberships(userId) {
   const { data, error } = await supabase.from('project_members').select('project_id, role').eq('user_id', userId);
@@ -529,8 +554,24 @@ const withPassword = (body) => {
   return body;
 };
 // adoptExisting:true = the admin confirmed taking over an orphan sign-in account (see 409 orphan_auth_user)
-export const adminCreateUser = async ({ email, fullName, role, adoptExisting = false }) =>
-  withPassword(await adminCall('create', { email, full_name: fullName, role, ...(adoptExisting ? { adoptExisting: true } : {}) }));
+// initialPassword (optional, bulk import): the admin-chosen first password (e.g. an employee id). The server answers
+// { user, passwordProvided: true } (it never echoes the password) and the person is still forced to change it at the
+// first login. The value only travels in this request body: never store it, never log it.
+export const adminCreateUser = async ({ email, fullName, role, adoptExisting = false, initialPassword }) => {
+  const supplied = typeof initialPassword === 'string' && initialPassword !== '';
+  const body = await adminCall('create', {
+    email,
+    full_name: fullName,
+    role,
+    ...(adoptExisting ? { adoptExisting: true } : {}),
+    ...(supplied ? { initialPassword } : {}),
+  });
+  if (supplied) {
+    if (body.passwordProvided !== true || !body.user) throw new AppError('ระบบตอบกลับไม่ถูกต้อง', 'bad_response');
+    return body;
+  }
+  return withPassword(body);
+};
 // -> { user, temporaryPassword, sessionsRevoked, audit? }
 export const adminResetPassword = async (userId) => withPassword(await adminCall('resetPassword', { userId }));
 export const adminSetRole = (userId, role) => adminCall('setRole', { userId, role });
@@ -1646,4 +1687,30 @@ export async function updateProjectTracking(projectId, updates = {}) {
     await logStatusChange(projectId, updates.previous_status, payload.status);
   }
   return row;
+}
+
+// Bulk import: set projects.project_co ONLY while it is still NULL / empty at write time (a person may have filled
+// it since the preview). Touches no other column. -> 'set' | 'kept' (0 rows matched = filled meanwhile)
+export async function setProjectCoIfEmpty(projectId, text) {
+  const v = String(text || '').trim();
+  if (!projectId || !v) throw new AppError('ไม่มีข้อมูลที่ต้องบันทึก', 'bad_request');
+  let res;
+  try {
+    res = await supabase
+      .from('projects')
+      .update({ project_co: v })
+      .eq('id', projectId)
+      .or('project_co.is.null,project_co.eq.')
+      .select('id');
+  } catch {
+    throw new AppError('เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่อีกครั้ง', 'network');
+  }
+  if (res.error) throw writeError(res.error);
+  if (!res.data || res.data.length === 0) return 'kept';
+  try {
+    await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลติดตามงาน: Project Co=${v} (นำเข้าจาก Excel)`);
+  } catch (err) {
+    console.warn('logActivity (tracking_update) failed:', err?.message);
+  }
+  return 'set';
 }

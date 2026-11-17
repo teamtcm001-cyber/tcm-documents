@@ -1257,6 +1257,53 @@ button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus
   .dlg .modal-body { padding: 18px 16px; }
 }
 
+/* ===== Admin bulk import from Excel ===== */
+.dlg.adm-imp { width: min(980px, 100%); }
+.adm-imp-chips { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.adm-imp-chips .trk-badge b { margin-left: 4px; }
+.adm-imp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.adm-imp-head h4 { margin: 0; }
+.adm-imp-check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--navy); font-size: 14px; }
+.adm-imp-check input { width: 16px; height: 16px; flex-shrink: 0; }
+.adm-imp-opt { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--gray-200); border-radius: 10px; background: var(--bg); margin-bottom: 12px; }
+.adm-imp-warns { margin-bottom: 12px; border: 1px solid #F2D391; background: #FFF9EA; border-radius: 10px; padding: 8px 12px; font-size: 13px; color: #8A5300; }
+.adm-imp-warns summary { cursor: pointer; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.adm-imp-warns ul { margin: 8px 0 2px; padding-left: 18px; max-height: 180px; overflow-y: auto; overflow-wrap: anywhere; }
+.adm-imp-list { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; border: 1px solid var(--gray-200); border-radius: 10px; }
+.adm-imp-person { padding: 8px 12px; border-bottom: 1px solid var(--gray-100); display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.adm-imp-person:last-child { border-bottom: none; }
+.adm-imp-who { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.adm-imp-mail { overflow-wrap: anywhere; }
+.adm-imp-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.adm-imp-warn { flex-basis: 100%; color: #8A5300; display: flex; gap: 6px; align-items: flex-start; }
+.adm-imp-warn svg { margin-top: 3px; flex-shrink: 0; }
+.adm-imp-projlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.adm-imp-proj { border: 1px solid var(--gray-200); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.adm-imp-proj.is-skipped { background: #FFFCF3; border-color: #F2D391; }
+.adm-imp-proj-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.adm-imp-proj-name { color: var(--navy); overflow-wrap: anywhere; min-width: 0; }
+.adm-imp-map { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.adm-imp-map select { flex: 1 1 280px; min-width: 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--gray-200); border-radius: 8px; background: white; font-size: 14px; }
+.adm-imp-coText { overflow-wrap: anywhere; }
+.adm-imp-colist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.adm-imp-co { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 13.5px; }
+.adm-imp-co-name { overflow-wrap: anywhere; min-width: 0; }
+.adm-imp-status { font-weight: 500; color: var(--navy); margin-bottom: 8px; overflow-wrap: anywhere; }
+.adm-imp-bar { height: 10px; border-radius: 999px; background: var(--gray-100); overflow: hidden; }
+.adm-imp-bar span { display: block; height: 100%; background: var(--steel); transition: width 0.2s; }
+.adm-imp-steps { list-style: none; margin: 0; padding: 8px 10px; max-height: 260px; overflow-y: auto; border: 1px solid var(--gray-200); border-radius: 10px; font-size: 13px; }
+.adm-imp-steps li { padding: 2px 0; overflow-wrap: anywhere; }
+.adm-imp-steps .st-ok > span:first-child { color: #166534; }
+.adm-imp-steps .st-fail { color: #B42318; }
+.adm-imp-steps .st-skip { color: #8A5300; }
+.adm-imp-temp { align-items: center; }
+.adm-imp-pw { font-family: 'Courier New', monospace; font-weight: 700; padding: 4px 8px; border-radius: 6px; background: var(--navy-50); color: var(--navy); user-select: all; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .adm-imp-proj { padding: 10px; }
+  .adm-imp-map select { flex-basis: 100%; }
+  .adm-imp-who { flex-basis: 100%; }
+}
+
 /* ===== Project drawer tabs + members panel (ผู้ดูแลโครงการ) ===== */
 .drawer-tabs { display: flex; gap: 4px; padding: 0 20px; background: white; border-bottom: 1px solid var(--gray-200); overflow-x: auto; }
 .drawer-tab {

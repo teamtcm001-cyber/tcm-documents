@@ -35,3 +35,6 @@ yarn-error.log*
 
 # Claude Code local permissions (can contain secrets from approved commands)
 .claude/settings.local.json
+
+# Personal login cards contain real initial passwords: never commit
+poster-output/

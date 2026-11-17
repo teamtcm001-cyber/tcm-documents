@@ -4,6 +4,7 @@ import { ToneBadge } from './TrackingBits.jsx'
 import { RoleBadge } from './AccessBits.jsx'
 import { CreateUserDialog, TempPasswordDialog } from './AdminCreateUser.jsx'
 import AdminUserDialog from './AdminUserDialog.jsx'
+import AdminImport from './AdminImport.jsx'
 import { useToast } from './Toast.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { adminListUsers, fetchAllProjectsForAdmin } from '../api/supabase.js'
@@ -63,6 +64,7 @@ export default function AdminConsole() {
   const [q, setQ] = useState('')
   const [roleFilter, setRoleFilter] = useState('all')
   const [createOpen, setCreateOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [manageId, setManageId] = useState(null)
   const [secret, setSecret] = useState(null) // { kind, email, name, password, then? } — shown once, never persisted
 
@@ -152,6 +154,9 @@ export default function AdminConsole() {
             <button className="btn btn-ghost btn-sm" onClick={load} disabled={loading}>
               <Icon name="refresh" size={14} /> รีเฟรช
             </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setImportOpen(true)} data-testid="import-open">
+              <Icon name="upload" size={14} /> นำเข้าจากไฟล์ Excel
+            </button>
             <button className="btn btn-primary btn-sm" onClick={() => setCreateOpen(true)} data-testid="add-user">
               <Icon name="plus" size={14} /> เพิ่มผู้ใช้
             </button>
@@ -240,6 +245,8 @@ export default function AdminConsole() {
           }}
         />
       )}
+
+      {importOpen && <AdminImport onClose={() => setImportOpen(false)} onDone={load} />}
 
       {managed && (
         <AdminUserDialog

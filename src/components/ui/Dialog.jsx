@@ -107,6 +107,7 @@ export function ConfirmDialog({
   cancelLabel = 'ยกเลิก',
   danger = false,
   busy = false,
+  confirmDisabled = false,
   error = '',
   onConfirm,
   onCancel,
@@ -125,7 +126,7 @@ export function ConfirmDialog({
           <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} data-cancel>
             {cancelLabel}
           </button>
-          <button type="button" className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={onConfirm} disabled={busy}>
+          <button type="button" className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={onConfirm} disabled={busy || confirmDisabled}>
             {busy ? 'กำลังดำเนินการ...' : confirmLabel}
           </button>
         </>
