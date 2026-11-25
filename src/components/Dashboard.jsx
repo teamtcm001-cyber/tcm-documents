@@ -3,6 +3,7 @@ import Icon from './Icon.jsx'
 import { fetchProjects, fetchFiles } from '../api/supabase.js'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { NoProjectsNotice, ReadOnlyBadge } from './AccessBits.jsx'
+import { useZipDownload } from './ZipDownload.jsx'
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
 
 function StatCards({ projects, files }) {
@@ -46,7 +47,7 @@ function StatCards({ projects, files }) {
   )
 }
 
-function ProjectCard({ project, fileCount, latestDate, onOpen, onZip }) {
+function ProjectCard({ project, fileCount, latestDate, onOpen, onZip, zipBusy }) {
   return (
     <div className="proj-card" onClick={onOpen}>
       <div className="proj-thumb" style={{ background: project.color || '#3A6EA5' }}>
@@ -77,6 +78,9 @@ function ProjectCard({ project, fileCount, latestDate, onOpen, onZip }) {
             onZip?.()
           }}
           title="Zip ล่าสุด"
+          aria-label={`ดาวน์โหลด Zip ไฟล์ล่าสุดของโครงการ ${project.name}`}
+          disabled={zipBusy}
+          data-testid="dash-zip"
         >
           <Icon name="zip" size={15} />
         </button>
@@ -144,11 +148,13 @@ function RecentActivity({ files, projects }) {
   )
 }
 
-export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZipProject, onNewProject }) {
+export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onNewProject }) {
   const { isExec, isMember, canUploadAny } = useAuth()
   const [projects, setProjects] = useState([])
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
+  const [zipLoadingId, setZipLoadingId] = useState(null) // project whose file list is being read for "Zip ล่าสุด"
+  const zip = useZipDownload()
 
   useEffect(() => {
     load()
@@ -173,6 +179,12 @@ export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZ
     }
   }
 
+  // "Zip ล่าสุด": the latest version of every document of the project (read fresh and complete, see useZipDownload)
+  const zipLatest = (project) => {
+    setZipLoadingId(project.id)
+    Promise.resolve(zip.beginProject(project)).finally(() => setZipLoadingId(null))
+  }
+
   const projInfo = projects
     .map((p) => {
       const fs = files.filter((f) => f.projectId === p.id)
@@ -187,6 +199,7 @@ export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZ
         <div className="container" style={{ display: 'grid', placeItems: 'center', minHeight: 280 }}>
           <div className="spinner"></div>
         </div>
+        {zip.dialog}
       </section>
     )
   }
@@ -238,7 +251,8 @@ export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZ
                     fileCount={fileCount}
                     latestDate={latestDate}
                     onOpen={() => onOpenProject(project.id)}
-                    onZip={() => onZipProject?.(project)}
+                    onZip={() => zipLatest(project)}
+                    zipBusy={zip.busy}
                   />
                 ))}
               </div>
@@ -257,6 +271,7 @@ export default function Dashboard({ refreshKey, onOpenProject, onOpenUpload, onZ
           </div>
         </div>
       </div>
+      {zip.dialog}
     </section>
   )
 }

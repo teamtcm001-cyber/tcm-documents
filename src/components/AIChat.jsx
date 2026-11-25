@@ -13,6 +13,8 @@ import {
 import { searchFiles } from '../utils/aiSearch.js'
 import { planGrounding, buildGrounding, localAnswer, portfolioCapNote, stripPassageMarkers } from '../utils/chatRetrieval.js'
 import PreviewModal from './PreviewModal.jsx'
+import { useZipDownload } from './ZipDownload.jsx'
+import { fmtBytes, planZip } from '../utils/zipDownload.js'
 
 // Call backend /api/chat for real Claude AI (if configured)
 // The server only needs identifying metadata. Extracted document text (content_text,
@@ -120,6 +122,7 @@ function getInstallmentsCached(projectId) {
 
 const CAPTION = 'สรุปโดย AI จากเอกสารและข้อมูลติดตามงานในระบบ — ตรวจสอบกับเอกสารต้นฉบับก่อนใช้งานจริง'
 const NOTE_LATEST = '“ล่าสุด” ดูจากวันที่อัปโหลดไฟล์ ไม่ใช่วันที่ในเอกสาร'
+const NOTE_MEETINGS_BY_UPLOAD = 'ชุดนี้เรียงตามวันที่อัปโหลด เพราะชื่อไฟล์ไม่มีเลขครั้ง/วันที่'
 const NOTE_TRUNCATED = 'คำตอบถูกตัดเพราะยาวเกินไป ลองถามให้เจาะจงขึ้น'
 const NOTE_AI_DOWN_FILES = 'ขณะนี้ AI สรุปไม่ได้ — แสดงผลค้นหาไฟล์แทน'
 const NOTE_AI_DOWN_TRACKING = 'ขณะนี้ AI สรุปไม่ได้ — แสดงข้อมูลติดตามงานจากระบบแทน'
@@ -161,6 +164,9 @@ export default function AIChat({ open, onClose }) {
   const [previewFile, setPreviewFile] = useState(null)
   const endRef = useRef(null)
   const toast = useToast()
+  const zip = useZipDownload()
+  // per answer (message index): ids of listed files the person UNticked. Default = everything listed is selected.
+  const [skipped, setSkipped] = useState({})
 
   useEffect(() => {
     if (!open) return
@@ -314,7 +320,14 @@ export default function AIChat({ open, onClose }) {
       if (isSummary && usedAI === 'claude') {
         const cov = built?.coverage
         if (cov?.partial && cov.filesSelected > 0) notes.push(`อ่านเนื้อหา ${cov.filesRead} จาก ${cov.filesSelected} ไฟล์ (เฉพาะส่วนต้นของเอกสาร)`)
-        if (built?.grounding?.passages?.length) notes.push(NOTE_LATEST)
+        const passages = built?.grounding?.passages || []
+        if (passages.length) {
+          // meeting minutes are ordered by meeting number / date per series, so "ล่าสุด = upload date" is false for THEM;
+          // it still holds for every other kind of source (contract, TOR, ...): say it whenever one of those is a source
+          const meetings = Array.isArray(built.meetings) ? built.meetings : Array.isArray(built.grounding.meetings) ? built.grounding.meetings : []
+          if (passages.some((ps) => ps && !ps.series)) notes.push(NOTE_LATEST)
+          if (meetings.some((m) => m && m.orderedByUpload === true)) notes.push(NOTE_MEETINGS_BY_UPLOAD)
+        }
       }
 
       // The server only knows the slim context: map source files back to the full objects
@@ -372,8 +385,48 @@ export default function AIChat({ open, onClose }) {
     }
   }
 
+  // "ดาวน์โหลด Zip: <project>" -> the latest version of every document of that project, read fresh and complete
+  // (paged, so a big project is not silently cut), after a confirm dialog with the true count and size.
   const triggerZip = (projectCode) => {
-    toast(`Zip โครงการ ${projectCode} ยังไม่รองรับ`, 'err')
+    const code = String(projectCode || '').trim().toLowerCase()
+    const { projects } = ctxRef.current
+    const project = projects.find((p) => String(p.code || '').trim().toLowerCase() === code) || projects.find((p) => String(p.name || '').trim().toLowerCase() === code)
+    if (!project) {
+      toast(`ไม่พบโครงการ ${projectCode} ในรายการที่คุณเข้าถึงได้`, 'err')
+      return
+    }
+    zip.beginProject(project)
+  }
+
+  const toggleListed = (msgIndex, id) =>
+    setSkipped((prev) => {
+      const cur = new Set(prev[msgIndex] || [])
+      const key = String(id)
+      if (cur.has(key)) cur.delete(key)
+      else cur.add(key)
+      return { ...prev, [msgIndex]: cur }
+    })
+  const setAllListed = (msgIndex, files, selectAll) =>
+    setSkipped((prev) => ({ ...prev, [msgIndex]: selectAll ? new Set() : new Set(files.map((f) => String(f.id))) }))
+
+  // The ticked files of one answer -> one zip. The answer (possibly from the server) only NAMES files: each id must exist in
+  // OUR index of what this person may see, and name / size / project / date are taken from that local row, never from
+  // the answer. Anything else is dropped and the person is told how many.
+  const zipListed = (msgIndex, files) => {
+    const { projects, files: index } = ctxRef.current
+    const byId = new Map(index.map((f) => [String(f.id), f]))
+    const ticked = files.filter((f) => !skipped[msgIndex]?.has(String(f.id)))
+    const chosen = []
+    for (const f of ticked) {
+      const local = byId.get(String(f.id))
+      if (local) chosen.push({ id: local.id, name: local.name, size: local.size, projectId: local.projectId, date: local.date, ext: local.ext, type: local.type })
+    }
+    const dropped = ticked.length - chosen.length
+    if (dropped > 0) toast(`ข้าม ${dropped} ไฟล์ที่ไม่อยู่ในรายการเอกสารของคุณ`, 'err')
+    if (chosen.length === 0) return
+    const projectIds = new Set(chosen.map((f) => f.projectId))
+    const only = projectIds.size === 1 ? projects.find((p) => p.id === [...projectIds][0]) : null
+    zip.begin({ files: chosen, projectCode: only?.code || null, scope: 'ไฟล์ที่เลือก', confirm: false })
   }
 
   // Render markdown-lite (bold + line breaks)
@@ -392,7 +445,8 @@ export default function AIChat({ open, onClose }) {
     })
   }
 
-  if (!open) return null
+  // closed panel: a zip that is still running keeps its progress dialog (it has the Cancel button)
+  if (!open) return zip.dialog
 
   return (
     <div className="chat-panel">
@@ -421,6 +475,21 @@ export default function AIChat({ open, onClose }) {
               )}
               {(m.intent === 'list' || m.intent === 'summary') && m.files && m.files.length > 0 && (
                 <div style={{ marginTop: m.intent === 'summary' ? 4 : 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {m.files.length >= 2 && (() => {
+                    const chosen = m.files.filter((f) => !skipped[i]?.has(String(f.id)))
+                    const plan = planZip(chosen)
+                    return (
+                      <div className="zip-sel" data-testid="chat-zip-sel">
+                        <span aria-live="polite">
+                          เลือก {plan.count} จาก {m.files.length} ไฟล์ <span style={{ color: 'var(--gray-500)' }}>({fmtBytes(plan.totalBytes)})</span>
+                        </span>
+                        <span className="zip-sel-links">
+                          <button type="button" onClick={() => setAllListed(i, m.files, true)} disabled={plan.count === m.files.length}>เลือกทั้งหมด</button>
+                          <button type="button" onClick={() => setAllListed(i, m.files, false)} disabled={plan.count === 0}>ล้างที่เลือก</button>
+                        </span>
+                      </div>
+                    )
+                  })()}
                   {m.files.map((f) => (
                     <div
                       key={f.id}
@@ -428,6 +497,16 @@ export default function AIChat({ open, onClose }) {
                       style={{ marginTop: 0, flexDirection: 'column', alignItems: 'stretch', cursor: 'default' }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {m.files.length >= 2 && (
+                          <input
+                            type="checkbox"
+                            className="pill-check"
+                            checked={!skipped[i]?.has(String(f.id))}
+                            onChange={() => toggleListed(i, f.id)}
+                            aria-label={`เลือกไฟล์ ${f.name}`}
+                            data-testid="chat-file-check"
+                          />
+                        )}
                         <div style={{ minWidth: 0, flex: 1, cursor: 'pointer' }} onClick={() => setPreviewFile(f)}>
                           <div
                             className="nm"
@@ -479,6 +558,18 @@ export default function AIChat({ open, onClose }) {
                   ))}
                 </div>
               )}
+              {(m.intent === 'list' || m.intent === 'summary') && m.files && m.files.length >= 2 && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  style={{ marginTop: 10 }}
+                  onClick={() => zipListed(i, m.files)}
+                  disabled={zip.busy || m.files.every((f) => skipped[i]?.has(String(f.id)))}
+                  data-testid="chat-zip-selected"
+                >
+                  <Icon name="zip" size={13} /> ดาวน์โหลดที่เลือกเป็น Zip
+                </button>
+              )}
               {(m.intent === 'summary' || (m.notes && m.notes.length > 0)) && (
                 <div className="chat-grounding-note" style={{ marginTop: 8, fontSize: 10, color: 'var(--gray-500)', lineHeight: 1.5 }}>
                   {m.intent === 'summary' && <div>{CAPTION}</div>}
@@ -500,7 +591,19 @@ export default function AIChat({ open, onClose }) {
                 </div>
               )}
               {m.intent === 'download_zip' && m.projectCode && (
-                <div className="file-pill" onClick={() => triggerZip(m.projectCode)}>
+                <div
+                  className="file-pill"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => triggerZip(m.projectCode)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      triggerZip(m.projectCode)
+                    }
+                  }}
+                  data-testid="chat-zip-project"
+                >
                   <Icon name="zip" size={14} style={{ color: 'var(--green)' }} />
                   <span className="nm">ดาวน์โหลด Zip: {m.projectCode}</span>
                 </div>
@@ -561,6 +664,7 @@ export default function AIChat({ open, onClose }) {
       {previewFile && (
         <PreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
       )}
+      {zip.dialog}
     </div>
   )
 }

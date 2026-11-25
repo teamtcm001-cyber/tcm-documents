@@ -1350,3 +1350,37 @@ button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus
   .pm-ctl, .pm-found-ctl { width: 100%; }
   .pm-ctl select, .pm-found-ctl select { flex: 1 1 140px; }
 }
+
+/* ===== Select documents + ZIP download ===== */
+.file-row.selectable { grid-template-columns: 20px 36px minmax(0, 1fr) auto auto; gap: 10px; }
+.file-row.selected { border-color: var(--steel); background: var(--steel-50); }
+.file-check, .sel-all input, .pill-check { width: 18px; height: 18px; accent-color: var(--navy); cursor: pointer; flex: none; margin: 0; }
+.file-check:focus-visible, .sel-all input:focus-visible, .pill-check:focus-visible { outline: 2px solid var(--steel); outline-offset: 2px; }
+.drawer-selectrow { justify-content: space-between; }
+.sel-all { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--navy); font-weight: 500; cursor: pointer; }
+.filter-chip:disabled { opacity: 0.45; cursor: default; }
+.sel-bar {
+  position: sticky; bottom: 0; z-index: 3; flex: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap;
+  padding: 12px 24px; background: white; border-top: 1px solid var(--gray-200);
+  box-shadow: 0 -6px 16px rgba(31,58,95,0.10);
+}
+.sel-bar-txt { font-size: 14px; color: var(--navy); font-weight: 600; }
+.sel-bar-txt .muted { font-weight: 400; }
+.zip-bar { height: 8px; background: var(--gray-200); border-radius: 999px; overflow: hidden; }
+.zip-bar .fill { height: 100%; background: var(--green); transition: width 0.25s; }
+.zip-failed-list { margin: 0; padding: 8px 8px 8px 24px; max-height: 200px; overflow-y: auto; background: #FFF5F5; border-radius: 8px; font-size: 12px; }
+.zip-failed-list li { margin-bottom: 6px; overflow-wrap: anywhere; }
+.msg .zip-sel { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--navy); }
+.msg .zip-sel-links { display: flex; gap: 10px; }
+.msg .zip-sel-links button { background: none; border: none; padding: 0; font: inherit; color: var(--steel); cursor: pointer; text-decoration: underline; }
+.msg .zip-sel-links button:disabled { color: var(--gray-400); cursor: default; text-decoration: none; }
+@media (max-width: 560px) {
+  /* name on the first line; badge + action buttons on a second line under it */
+  .file-row.selectable { grid-template-columns: 20px 36px minmax(0, 1fr) auto; row-gap: 6px; }
+  .file-row.selectable > :nth-child(3) { grid-column: 3 / -1; }
+  .file-row.selectable > :nth-child(4) { grid-column: 3; grid-row: 2; }
+  .file-row.selectable > :nth-child(5) { grid-column: 4; grid-row: 2; }
+  .sel-bar { padding: 10px 14px; }
+  .sel-bar .btn { flex: 1 1 100%; justify-content: center; }
+}

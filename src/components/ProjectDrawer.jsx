@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import {
@@ -13,12 +13,42 @@ import { ReadOnlyBadge, ManagerBadge } from './AccessBits.jsx'
 import ProjectMembersPanel from './ProjectMembersPanel.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { CoContact } from './TrackingBits.jsx'
+import { useZipDownload } from './ZipDownload.jsx'
+import { fmtBytes, planZip } from '../utils/zipDownload.js'
 
-function FileRow({ file, canEdit, onDelete, onDownload, onPreview }) {
+// version groups (type + base name, newest first), the groups that pass the search / type filter, and the rows on screen
+// (every version, or only the newest of each group with "ล่าสุด")
+function layoutFiles(files, filter, search, latestOnly) {
+  const groups = {}
+  files.forEach((f) => {
+    const k = `${f.type}|${f.baseName}`
+    if (!groups[k]) groups[k] = []
+    groups[k].push(f)
+  })
+  Object.values(groups).forEach((g) => g.sort((a, b) => new Date(b.date) - new Date(a.date)))
+  const filteredKeys = Object.keys(groups).filter((k) => {
+    const [type, baseName] = k.split('|')
+    if (filter !== 'all' && type !== filter) return false
+    if (search && !baseName.toLowerCase().includes(search.toLowerCase())) return false
+    return true
+  })
+  const displayedFiles = filteredKeys.flatMap((k) => (latestOnly ? groups[k].slice(0, 1) : groups[k]))
+  return { groups, filteredKeys, displayedFiles }
+}
+
+function FileRow({ file, canEdit, selected, onToggle, onDelete, onDownload, onPreview }) {
   const color = TYPE_COLOR[file.type] || '#6B7280'
   const label = TYPE_LABEL[file.type] || file.type
   return (
-    <div className="file-row">
+    <div className={`file-row selectable ${selected ? 'selected' : ''}`}>
+      <input
+        type="checkbox"
+        className="file-check"
+        checked={selected}
+        onChange={() => onToggle(file.id)}
+        aria-label={`เลือกไฟล์ ${file.name}`}
+        data-testid="file-check"
+      />
       <div className="file-ico" style={{ background: color, cursor: 'pointer' }} onClick={() => onPreview(file)}>
         {label.length > 3 ? label.slice(0, 3) : label}
       </div>
@@ -81,7 +111,9 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
   const [reindexProgress, setReindexProgress] = useState({ current: 0, total: 0 })
   const [reindexReport, setReindexReport] = useState(null) // { ok, failed: [{name, reason}], empty: [{name, reason}] }
   const [previewFile, setPreviewFile] = useState(null)
+  const [selected, setSelected] = useState(() => new Set()) // ids of the ticked documents (displayed versions)
   const toast = useToast()
+  const zip = useZipDownload()
 
   useEffect(() => {
     if (!project) return
@@ -89,6 +121,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
   }, [project, refreshKey])
 
   useEffect(() => setTab('docs'), [project?.id])
+  useEffect(() => setSelected(new Set()), [project?.id])
 
   // arrow keys move between the two tabs (WAI-ARIA tabs pattern)
   const onTabKey = (e) => {
@@ -106,6 +139,12 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       const normalized = rows.map(normalizeFile)
       computeIsLatest(normalized)
       setFiles(normalized)
+      // a ticked file that is gone (deleted here or elsewhere) can no longer be selected
+      setSelected((prev) => {
+        const ids = new Set(normalized.map((f) => f.id))
+        const next = new Set([...prev].filter((id) => ids.has(id)))
+        return next.size === prev.size ? prev : next
+      })
     } catch (err) {
       toast('โหลดไฟล์ไม่สำเร็จ: ' + err.message, 'err')
     } finally {
@@ -122,9 +161,23 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
     }
   }
 
+  const toggleSelected = (id) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
   const handleDelete = async (file) => {
     try {
       await deleteFile(file.id)
+      setSelected((prev) => {
+        if (!prev.has(file.id)) return prev
+        const next = new Set(prev)
+        next.delete(file.id)
+        return next
+      })
       toast('ลบไฟล์เรียบร้อย')
       await load()
       onChanged?.()
@@ -228,28 +281,43 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
     await load()
   }
 
-  if (!project) return null
+  const { groups, filteredKeys, displayedFiles } = useMemo(
+    () => layoutFiles(files, filter, search, showLatestOnly),
+    [files, filter, search, showLatestOnly]
+  )
+  // the selection only ever holds rows that are on screen: a search / filter / "ล่าสุด" change drops the ticks that
+  // just disappeared (so "เลือก N ไฟล์" and the zip always match what the person sees)
+  const displayedKey = displayedFiles.map((f) => f.id).join('|')
+  useEffect(() => {
+    const ids = new Set(displayedFiles.map((f) => f.id))
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => ids.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayedKey])
 
-  // group by baseName + type
-  const groups = {}
-  files.forEach((f) => {
-    const k = `${f.type}|${f.baseName}`
-    if (!groups[k]) groups[k] = []
-    groups[k].push(f)
-  })
-  Object.values(groups).forEach((g) => g.sort((a, b) => new Date(b.date) - new Date(a.date)))
+  if (!project) return null
 
   const typesInProject = Array.from(new Set(files.map((f) => f.type)))
   const types = ['all', ...typesInProject]
 
-  const filteredKeys = Object.keys(groups).filter((k) => {
-    const [type, baseName] = k.split('|')
-    if (filter !== 'all' && type !== filter) return false
-    if (search && !baseName.toLowerCase().includes(search.toLowerCase())) return false
-    return true
-  })
-
   const totalSize = files.reduce((s, f) => s + (f.size || 0), 0)
+
+  const selectedFiles = files.filter((f) => selected.has(f.id))
+  const selectedPlan = planZip(selectedFiles)
+  const allDisplayedSelected = displayedFiles.length > 0 && displayedFiles.every((f) => selected.has(f.id))
+  const someDisplayedSelected = displayedFiles.some((f) => selected.has(f.id))
+
+  const selectAllDisplayed = () =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      displayedFiles.forEach((f) => next.add(f.id))
+      return next
+    })
+  const downloadSelectedZip = () => zip.begin({ files: selectedFiles, projectCode: project.code, scope: 'ไฟล์ที่เลือก', confirm: false })
+  // re-reads the project's FULL list (paged, no content_text): the drawer's own list may be capped / stale
+  const downloadProjectZip = () => zip.beginProject(project)
 
   return (
     <>
@@ -333,7 +401,13 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
             </div>
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
-            <button className="btn btn-sm btn-primary" onClick={() => toast('Zip ทั้งโครงการ ยังไม่รองรับ', 'err')}>
+            <button
+              className="btn btn-sm btn-primary"
+              onClick={downloadProjectZip}
+              disabled={loading || files.length === 0 || zip.busy}
+              title={files.length === 0 ? 'ยังไม่มีเอกสารในโครงการนี้' : 'รวมไฟล์เวอร์ชันล่าสุดของทุกเอกสารเป็น Zip'}
+              data-testid="zip-project"
+            >
               <Icon name="zip" size={13} /> Zip ทั้งโครงการ
             </button>
             {onOpenTracking && (
@@ -449,6 +523,26 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
               ))}
             </div>
 
+            {!loading && displayedFiles.length > 0 && (
+              <div className="drawer-tools drawer-selectrow" style={{ borderTop: 0, paddingTop: 0 }}>
+                <label className="sel-all">
+                  <input
+                    type="checkbox"
+                    checked={allDisplayedSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someDisplayedSelected && !allDisplayedSelected
+                    }}
+                    onChange={() => (allDisplayedSelected ? setSelected(new Set()) : selectAllDisplayed())}
+                    data-testid="select-all"
+                  />{' '}
+                  เลือกทั้งหมด ({displayedFiles.length})
+                </label>
+                <button type="button" className="filter-chip" onClick={() => setSelected(new Set())} disabled={selected.size === 0} data-testid="clear-selection">
+                  ล้างที่เลือก
+                </button>
+              </div>
+            )}
+
             <div className="drawer-body" {...(canManage ? { role: 'tabpanel', id: `${tabsId}-panel`, 'aria-labelledby': `${tabsId}-docs` } : {})}>
               {loading ? (
                 <div style={{ display: 'grid', placeItems: 'center', padding: 40 }}>
@@ -488,6 +582,8 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                             key={f.id}
                             file={f}
                             canEdit={canEdit}
+                            selected={selected.has(f.id)}
+                            onToggle={toggleSelected}
                             onDelete={handleDelete}
                             onDownload={handleDownload}
                             onPreview={setPreviewFile}
@@ -499,9 +595,22 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                 })
               )}
             </div>
+
+            {selected.size > 0 && (
+              <div className="sel-bar" role="region" aria-label="ไฟล์ที่เลือก" data-testid="sel-bar">
+                <div className="sel-bar-txt" aria-live="polite">
+                  เลือก {selectedPlan.count} ไฟล์ <span className="muted">(ขนาดรวม {fmtBytes(selectedPlan.totalBytes)})</span>
+                </div>
+                <button type="button" className="btn btn-sm btn-primary" onClick={downloadSelectedZip} disabled={selectedPlan.count === 0 || zip.busy} data-testid="zip-selected">
+                  <Icon name="zip" size={13} /> ดาวน์โหลด Zip
+                </button>
+              </div>
+            )}
           </>
         )}
       </div>
+
+      {zip.dialog}
 
       {reindexReport && (
         <ReindexReportModal report={reindexReport} onClose={() => setReindexReport(null)} />

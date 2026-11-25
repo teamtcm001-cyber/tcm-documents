@@ -698,6 +698,40 @@ export async function fetchFiles(projectId) {
   return data || [];
 }
 
+// ALL file rows of one project, WITHOUT content_text (extracted text, up to 50k chars per file), for the ZIP downloads.
+// PostgREST answers at most `max-rows` (1000 on Supabase) per request, so this pages with Range until the exact count
+// is reached (an unknown / smaller server limit is handled too: it stops only when the count is met or a page is empty).
+// A truncated list would silently drop documents from "Zip ทั้งโครงการ"; it throws instead of returning a partial list.
+const ZIP_FILE_COLS = 'id, project_id, type, name, base_name, rev, size, ext, is_latest, created_at';
+export const ZIP_MAX_FILES = 20000;
+export async function fetchProjectFilesForZip(projectId) {
+  const PAGE = 1000;
+  const rows = [];
+  let total = null;
+  for (;;) {
+    const { data, error, count } = await supabase
+      .from('files')
+      .select(ZIP_FILE_COLS, { count: 'exact' })
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(rows.length, rows.length + PAGE - 1);
+    if (error) throw error;
+    if (total === null && typeof count === 'number') total = count;
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (total !== null ? rows.length >= total : data.length < PAGE) break;
+    if (rows.length >= ZIP_MAX_FILES) {
+      throw new AppError(`โครงการนี้มีไฟล์เกิน ${ZIP_MAX_FILES} ไฟล์ รวม Zip ทั้งโครงการไม่ได้ — กรุณาเลือกไฟล์ที่ต้องการแทน`, 'too_many');
+    }
+  }
+  if (total !== null && rows.length < total) {
+    throw new AppError('อ่านรายการไฟล์ได้ไม่ครบ กรุณาลองใหม่อีกครั้ง', 'incomplete');
+  }
+  const seen = new Set();
+  return rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+}
+
 export async function fetchLatestFiles(limit = 10) {
   const { data, error } = await supabase
     .from('files')
@@ -946,6 +980,44 @@ export async function getSignedFileUrl(fileId, { download = false, name } = {}) 
   if (!body?.url || typeof body.url !== 'string') throw new AppError('เปิดไฟล์ไม่สำเร็จ', 'bad_response');
   // absolute: the Office Online viewer fetches the file from Microsoft's servers
   return /^https?:\/\//i.test(body.url) ? body.url : `${window.location.origin}${body.url}`;
+}
+
+// Batch variant for the ZIP download: up to 50 files.row ids per call (the server's limit) ->
+// { [fileId]: absolute url }. Ids the person may not see (RLS) or that do not exist are simply
+// ABSENT from the answer (the server does not say which of the two it is). Inline (not an
+// attachment) links: the bytes are fetch()ed by the app and put into the archive.
+export async function getSignedFileUrls(fileIds, { signal } = {}) {
+  const ids = Array.from(new Set((fileIds || []).filter((x) => x !== undefined && x !== null && x !== '').map(String)));
+  if (ids.length === 0) return {};
+  if (ids.length > 50) throw new AppError('ขอลิงก์ไฟล์ได้ครั้งละไม่เกิน 50 ไฟล์', 'bad_request');
+  let res;
+  try {
+    res = await authFetch('/api/drive-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileIds: ids }),
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof AppError || err?.name === 'AbortError') throw err;
+    throw new AppError('เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่อีกครั้ง', 'network');
+  }
+  if (!res.ok) {
+    const { code, message } = await readApiError(res);
+    if (res.status === 401) throw new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+    throw new AppError(
+      apiErrorMessage(res.status, code, message, FILE_URL_ERRORS[res.status] || 'เปิดไฟล์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง'),
+      code
+    );
+  }
+  const body = await res.json().catch(() => null);
+  if (!body || typeof body.urls !== 'object' || body.urls === null) throw new AppError('เปิดไฟล์ไม่สำเร็จ', 'bad_response');
+  const out = {};
+  for (const [id, url] of Object.entries(body.urls)) {
+    if (typeof url !== 'string' || !url) continue;
+    out[id] = /^https?:\/\//i.test(url) ? url : `${window.location.origin}${url}`;
+  }
+  return out;
 }
 
 // fetch() the file bytes. A link that expired between minting and use (403 link_expired)
