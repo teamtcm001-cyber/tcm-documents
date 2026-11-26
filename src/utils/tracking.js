@@ -210,16 +210,29 @@ export function statusOptions(current) {
 
 export const HEALTH_LABEL = { red: 'ต้องดำเนินการ', amber: 'ควรติดตาม', green: 'ปกติ' }
 
+// ---------- per-project "no billing installments" switch (projects.has_installments) ----------
+// Some projects have no billing installments at all (e.g. a Hybrid project without Pre-con งวดเบิก).
+// The column comes from scripts/project-billing-flag.sql; until that has been run it is ABSENT from
+// every row, and absent / null / anything but the boolean false means "has installments" (today's
+// behaviour). Only an explicit `false` switches the installment rules off.
+export const NO_INSTALLMENTS_LABEL = 'ไม่มีงวดเบิก'
+export const NO_INSTALLMENTS_NOTE = 'โครงการนี้ไม่มีงวดเบิก'
+export const hasInstallments = (row) => row?.has_installments !== false
+
 // row: a project_tracking_overview row (+ optional ready_to_bill_days).
 // Closed projects skip the progress-based rules (stale / behind schedule) but
 // still get the installment rules.
+// A project switched to "no billing installments" (has_installments === false) gets NO installment
+// rule at all (overdue / ready-to-bill aging / due soon with missing documents), even if stored
+// installment rows or a stale ready_to_bill_days still come along; the progress rules still apply.
 export function computeHealth(row, { readyToBillDays } = {}) {
   const closed = row.project_status === CLOSED_PROJECT_STATUS
-  const rtb = readyToBillDays !== undefined ? readyToBillDays : row.ready_to_bill_days
+  const billing = hasInstallments(row)
+  const rtb = !billing ? null : readyToBillDays !== undefined ? readyToBillDays : row.ready_to_bill_days
   const red = []
   const amber = []
 
-  if ((row.installments_overdue || 0) > 0) red.push(`เลยกำหนดเบิก ${row.installments_overdue} งวด`)
+  if (billing && (row.installments_overdue || 0) > 0) red.push(`เลยกำหนดเบิก ${row.installments_overdue} งวด`)
 
   if (!closed && row.percent_complete != null && row.time_elapsed_pct != null) {
     const gap = row.time_elapsed_pct - row.percent_complete
@@ -229,7 +242,7 @@ export function computeHealth(row, { readyToBillDays } = {}) {
   if (rtb != null && rtb > READY_TO_BILL_DAYS) amber.push(`พร้อมเบิกค้างมา ${rtb} วัน`)
 
   const d = row.next_days_until_planned
-  if (row.next_installment_id && d != null && d >= 0 && d <= DUE_SOON_DAYS && row.next_docs_state === 'missing') {
+  if (billing && row.next_installment_id && d != null && d >= 0 && d <= DUE_SOON_DAYS && row.next_docs_state === 'missing') {
     amber.push(`งวดที่ ${row.next_installment_no} ครบกำหนด${d === 0 ? 'วันนี้' : `ใน ${d} วัน`} แต่เอกสารยังขาด`)
   }
 
@@ -239,7 +252,7 @@ export function computeHealth(row, { readyToBillDays } = {}) {
   }
 
   const level = red.length ? 'red' : amber.length ? 'amber' : 'green'
-  return { level, reasons: [...red, ...amber], closed }
+  return { level, reasons: [...red, ...amber], closed, noInstallments: !billing }
 }
 
 export const HEALTH_ORDER = { red: 0, amber: 1, green: 2 }
@@ -250,8 +263,10 @@ export function isStale(row) {
   return row.days_since_update == null || row.days_since_update > STALE_DAYS
 }
 
-// "next installment" line for the overview card
+// "next installment" line for the overview card. noInstallments: true = the project is switched to
+// "no billing installments" (the card shows a neutral badge instead of next / docs / counts).
 export function nextInstallmentLine(row) {
+  if (!hasInstallments(row)) return { text: NO_INSTALLMENTS_LABEL, tone: 'mute', noInstallments: true }
   if (!row.next_installment_id) {
     if (!row.installments_total) return { text: 'ยังไม่มีงวดงาน', tone: 'mute' }
     return { text: 'ไม่มีงวดที่ค้างเบิก', tone: 'ok' }

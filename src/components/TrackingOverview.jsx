@@ -4,7 +4,8 @@ import { fetchTrackingOverview } from '../api/supabase.js'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { NoProjectsNotice, ReadOnlyBadge } from './AccessBits.jsx'
 import {
-  computeHealth, HEALTH_ORDER, isStale, nextInstallmentLine, docsStateText, fmtThaiDate, todayTH,
+  computeHealth, HEALTH_ORDER, isStale, nextInstallmentLine, docsStateText, fmtThaiDate, todayTH, hasInstallments,
+  NO_INSTALLMENTS_LABEL,
 } from '../utils/tracking.js'
 import {
   HealthChip, ToneBadge, ProgressMeter, MeterLegend, NotInstalledNotice, ErrorNotice, PartialDataNotice, CriteriaPopover,
@@ -14,7 +15,7 @@ import {
 function ProjectRow({ item, mine, readOnly, onOpen }) {
   const { row, health } = item
   const next = nextInstallmentLine(row)
-  const docs = row.next_installment_id
+  const docs = !next.noInstallments && row.next_installment_id
     ? docsStateText(row.next_docs_state, row.next_required_docs_total, row.next_required_docs_attached)
     : null
   const never = row.days_since_update == null
@@ -74,6 +75,14 @@ function ProjectRow({ item, mine, readOnly, onOpen }) {
           </div>
         </div>
 
+        {next.noInstallments ? (
+          <div className="trk-col trk-no-billing-col">
+            <div className="trk-col-h">งวดเบิก</div>
+            <ToneBadge tone="mute" title="ตั้งค่าไว้ว่าโครงการนี้ไม่มีงวดเบิก — ไม่นำงวดมาคิดสถานะ">
+              {NO_INSTALLMENTS_LABEL}
+            </ToneBadge>
+          </div>
+        ) : (
         <div className="trk-col">
           <div className="trk-col-h">งวดเบิกถัดไป</div>
           <div className={`trk-next trk-text-${next.tone}`}>{next.text}</div>
@@ -96,6 +105,7 @@ function ProjectRow({ item, mine, readOnly, onOpen }) {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {health.reasons.length > 0 && (
@@ -170,7 +180,7 @@ export default function TrackingOverview({ onOpenProject }) {
     const s = { red: 0, amber: 0, green: 0, overdue: 0 }
     scoped.forEach(({ row, health }) => {
       s[health.level] += 1
-      s.overdue += row.installments_overdue || 0
+      if (hasInstallments(row)) s.overdue += row.installments_overdue || 0
     })
     return s
   }, [scoped])

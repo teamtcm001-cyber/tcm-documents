@@ -38,3 +38,6 @@ yarn-error.log*
 
 # Personal login cards contain real initial passwords: never commit
 poster-output/
+
+# Local test harnesses (kept out of the Temp folder, which Windows cleans; not committed)
+.tests-local/

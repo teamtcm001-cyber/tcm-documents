@@ -40,18 +40,44 @@ update public.installment_documents set attached_by = null where attached_by is 
 -- ---------- E. delete / edit permissions ----------
 -- Deleting an installment cascades to installment_documents and installment_events
 -- (foreign keys are ON DELETE CASCADE; referential actions bypass RLS).
+-- RE-RUN GUARD: after the per-person login (auth-01/02) is installed the policies of these
+-- tables belong to scripts/auth-02-enforce-rls.sql; re-creating the "using (true)" ones
+-- below would let every signed-in account delete/edit every project's rows. Skipped then.
 grant delete on public.project_installments to authenticated;
-drop policy if exists "Authenticated can delete installments" on public.project_installments;
-create policy "Authenticated can delete installments"
-  on public.project_installments for delete to authenticated using (true);
-
 grant update, delete on public.progress_updates to authenticated;
-drop policy if exists "Authenticated can update progress" on public.progress_updates;
-create policy "Authenticated can update progress"
-  on public.progress_updates for update to authenticated using (true) with check (true);
-drop policy if exists "Authenticated can delete progress" on public.progress_updates;
-create policy "Authenticated can delete progress"
-  on public.progress_updates for delete to authenticated using (true);
+do $legacy_rls$
+declare
+  v_tbl text;
+begin
+  if to_regclass('public.profiles') is not null
+     and to_regprocedure('public.can_edit_project(uuid)') is not null then
+    raise notice 'per-person login detected: legacy delete/edit policies NOT re-created (managed by auth-02-enforce-rls.sql).';
+    -- auth-01 installed but auth-02 not (yet): a tracking table with RLS on and NO policy
+    -- answers nothing to anybody. Say so loudly instead of leaving the app silently empty.
+    for v_tbl in
+      select c.relname::text from pg_class c
+      where c.relnamespace = 'public'::regnamespace and c.relkind = 'r' and c.relrowsecurity
+        and c.relname in ('progress_updates','project_installments','installment_events',
+                          'installment_documents','project_checklist_templates')
+        and not exists (select 1 from pg_policy p where p.polrelid = c.oid)
+      order by 1
+    loop
+      raise warning 'public.% has RLS on and NO policy: nobody can read or write it through the API. Run scripts/auth-02-enforce-rls.sql.', v_tbl;
+    end loop;
+  else
+    drop policy if exists "Authenticated can delete installments" on public.project_installments;
+    create policy "Authenticated can delete installments"
+      on public.project_installments for delete to authenticated using (true);
+
+    drop policy if exists "Authenticated can update progress" on public.progress_updates;
+    create policy "Authenticated can update progress"
+      on public.progress_updates for update to authenticated using (true) with check (true);
+    drop policy if exists "Authenticated can delete progress" on public.progress_updates;
+    create policy "Authenticated can delete progress"
+      on public.progress_updates for delete to authenticated using (true);
+  end if;
+end
+$legacy_rls$;
 
 -- The "as_of may not be in the future" guard (fix-1) only ran on INSERT; run it on
 -- UPDATE of as_of too so an edit cannot sneak a future date in.

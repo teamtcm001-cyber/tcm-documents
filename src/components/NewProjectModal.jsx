@@ -15,6 +15,8 @@ export default function NewProjectModal({ onClose, onCreated }) {
   const [co, setCo] = useState('')
   const [coPhone, setCoPhone] = useState('')
   const [phoneMsg, setPhoneMsg] = useState('')
+  // default: the project HAS billing installments (nothing extra is written)
+  const [noBilling, setNoBilling] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const toast = useToast()
 
@@ -29,9 +31,15 @@ export default function NewProjectModal({ onClose, onCreated }) {
       // optional; only sent when filled in so an empty form inserts exactly what it did before
       if (co.trim()) payload.project_co = co.trim()
       if (coPhone.trim()) payload.project_co_phone = coPhone
+      // only sent when ticked; the data layer drops it if the column does not exist yet
+      if (noBilling) payload.has_installments = false
       const created = await createProject(payload)
-      if (created?._phoneNotSaved) {
+      if (created?._phoneNotSaved && created?._billingFlagNotSaved) {
+        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึกเบอร์ติดต่อและการตั้งค่า "ไม่มีงวดเบิก" — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql และ project-billing-flag.sql แล้วตั้งค่าในหน้าติดตามงาน', 'err')
+      } else if (created?._phoneNotSaved) {
         toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึกเบอร์ติดต่อ — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql แล้วเพิ่มเบอร์ในหน้าติดตามงาน', 'err')
+      } else if (created?._billingFlagNotSaved) {
+        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึก "ไม่มีงวดเบิก" — ต้องให้ผู้ดูแลระบบรันสคริปต์ project-billing-flag.sql ก่อน แล้วตั้งค่าในหน้าติดตามงาน', 'err')
       } else {
         toast('สร้างโครงการเรียบร้อย')
       }
@@ -127,6 +135,13 @@ export default function NewProjectModal({ onClose, onCreated }) {
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="field">
+              <label className="trk-billing-switch" style={{ fontWeight: 400 }}>
+                <input type="checkbox" checked={noBilling} onChange={(e) => setNoBilling(e.target.checked)} data-testid="np-no-billing" />
+                <span>โครงการนี้ไม่มีงวดเบิก</span>
+              </label>
+              <span className="muted small">ติ๊กเฉพาะโครงการที่ไม่มีงวดเบิกเลย (เปลี่ยนภายหลังได้ในหน้าติดตามงาน)</span>
             </div>
             <div className="field">
               <label>สีโครงการ</label>

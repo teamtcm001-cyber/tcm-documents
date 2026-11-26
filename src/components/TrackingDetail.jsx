@@ -8,7 +8,7 @@ import { useAuth } from '../auth/AuthContext.jsx'
 import { ReadOnlyBadge, ManagerBadge } from './AccessBits.jsx'
 import {
   computeHealth, fmtThaiDate, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, phoneError, normalizePhones,
-  statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM,
+  statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM, hasInstallments,
 } from '../utils/tracking.js'
 import { HealthChip, ProjectStatusBadge, NotInstalledNotice, ErrorNotice, CoContact } from './TrackingBits.jsx'
 import TrackingProgress from './TrackingProgress.jsx'
@@ -264,8 +264,10 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProj
   const [history, setHistory] = useState([])
   const [installments, setInstallments] = useState([])
   const toast = useToast()
-  const { canEditProject } = useAuth()
+  const { canEditProject, canManageProject } = useAuth()
   const canEdit = canEditProject(projectId)
+  // the "โครงการนี้ไม่มีงวดเบิก" switch: admins and the manager of THIS project only (DB trigger enforces it)
+  const canToggleBilling = canManageProject(projectId)
 
   const loadAll = async () => {
     setStatus('loading')
@@ -336,7 +338,20 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProj
     const rtbDays = installments
       .filter((i) => i.status === 'ready_to_bill')
       .reduce((m, i) => Math.max(m, i.days_in_status ?? 0), -1)
+    // computeHealth itself ignores every installment rule when the project has no billing installments
     const health = computeHealth(row, { readyToBillDays: rtbDays >= 0 ? rtbDays : null })
+    const billing = hasInstallments(row)
+    // write ONLY projects.has_installments, then re-read the overview row (its installment columns change)
+    // The write succeeded once updateProjectTracking returns, so the screen must show the saved value even
+    // if the re-read fails (no error toast then: the save itself is not in doubt) or the view does not
+    // expose the column (half-applied migration).
+    const setBilling = async (value) => {
+      await updateProjectTracking(projectId, { has_installments: value })
+      const r = await fetchProjectTrackingRow(projectId)
+      if (r.data) setRow('has_installments' in r.data ? r.data : { ...r.data, has_installments: value })
+      else setRow((cur) => (cur ? { ...cur, has_installments: value } : cur))
+      onProjectChanged?.()
+    }
     body = (
       <>
         <ProjectHeader
@@ -356,6 +371,8 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProj
             canEdit={canEdit}
             onChanged={refreshInstallments}
             onOpenUpload={onOpenUpload}
+            hasInstallments={billing}
+            onSetHasInstallments={canToggleBilling ? setBilling : undefined}
           />
         </div>
       </>

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
+import { ConfirmDialog } from './ui/Dialog.jsx'
 import { useToast } from './Toast.jsx'
 import {
   createInstallment, updateInstallment, setInstallmentStatus, deleteInstallment,
@@ -7,6 +8,7 @@ import {
 import {
   STATUS_FLOW, ALL_STATUSES, STATUS_LABEL, STATUS_TONE, installmentHeadline, installmentName, isBackwardMove,
   docsStateText, fmtThaiDate, fmtThaiDateTime, countdownText, todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE,
+  NO_INSTALLMENTS_LABEL, NO_INSTALLMENTS_NOTE,
 } from '../utils/tracking.js'
 import { ToneBadge } from './TrackingBits.jsx'
 import TrackingChecklist from './TrackingChecklist.jsx'
@@ -340,8 +342,114 @@ function InstallmentCard({ inst, open, canEdit, onToggle, onChanged, onDeleted, 
   )
 }
 
+// ---------- "โครงการนี้ไม่มีงวดเบิก" switch (projects.has_installments) ----------
+// Checked = the project has NO billing installments. Rendered only for admins and the project's manager.
+// Turning it on while (non-cancelled) installments exist asks first (they are hidden and not counted,
+// never deleted). One write at a time: a ref lock + aria-disabled (NOT `disabled`, which would drop the
+// keyboard focus); focus is put back on the checkbox after every save / cancel.
+function NoBillingSwitch({ hasInstallments, storedCount, onSet }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [confirming, setConfirming] = useState(false)
+  const lock = useRef(false)
+  const inputRef = useRef(null)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  // after the dialog has unmounted (it may restore focus elsewhere) and after the panel re-rendered
+  const refocus = () => setTimeout(() => { if (mounted.current) inputRef.current?.focus() }, 0)
+
+  const write = async (value) => {
+    if (lock.current) return
+    lock.current = true
+    setBusy(true)
+    setError('')
+    let ok = false
+    try {
+      await onSet(value)
+      ok = true
+      toast(value ? 'เปิดใช้งวดเบิกของโครงการนี้แล้ว' : 'ตั้งค่าแล้ว: โครงการนี้ไม่มีงวดเบิก')
+    } catch (err) {
+      if (mounted.current) setError(err?.message || 'บันทึกไม่สำเร็จ')
+      // refused because this person is no longer admin / manager: the access re-read that follows removes
+      // the switch (and this inline message with it), so say it in a toast as well
+      if (err?.code === 'forbidden') toast(err.message, 'err')
+    } finally {
+      lock.current = false
+      if (mounted.current) {
+        setBusy(false)
+        if (ok) setConfirming(false)
+        if (ok || !confirming) refocus()
+      }
+    }
+  }
+
+  const onChange = (e) => {
+    if (lock.current) return // saving: the controlled checkbox simply keeps its state
+    const noBilling = e.target.checked
+    setError('')
+    if (noBilling && storedCount > 0) setConfirming(true)
+    else write(!noBilling)
+  }
+
+  return (
+    <div className="trk-billing-switch-wrap">
+      <label className="trk-billing-switch">
+        <input
+          ref={inputRef}
+          type="checkbox"
+          checked={!hasInstallments}
+          aria-disabled={busy || undefined}
+          onChange={onChange}
+          data-testid="no-billing-toggle"
+          aria-describedby="trk-billing-hint"
+        />
+        <span>โครงการนี้ไม่มีงวดเบิก</span>
+        {busy && <span className="muted small" role="status">กำลังบันทึก...</span>}
+      </label>
+      <div className="muted small" id="trk-billing-hint">
+        {hasInstallments
+          ? 'ติ๊กเมื่อโครงการไม่มีงวดเบิกเลย — ระบบจะไม่นำงวดมาคิดสถานะแดง/เหลือง (เฉพาะแอดมิน / ผู้ดูแลโครงการ)'
+          : 'เอาติ๊กออกเพื่อกลับมาใช้งวดเบิก (งวดที่บันทึกไว้จะกลับมาแสดง)'}
+      </div>
+      {error && !confirming && (
+        <div className="auth-msg err" role="alert" style={{ marginTop: 8, marginBottom: 0 }} data-testid="no-billing-error">
+          {error}
+        </div>
+      )}
+      {confirming && (
+        <ConfirmDialog
+          title="ตั้งค่าเป็น โครงการนี้ไม่มีงวดเบิก?"
+          confirmLabel="ยืนยัน ไม่มีงวดเบิก"
+          busy={busy}
+          error={error}
+          onConfirm={() => write(false)}
+          onCancel={() => {
+            setConfirming(false)
+            setError('')
+            refocus()
+          }}
+        >
+          <p style={{ margin: 0 }} data-testid="no-billing-confirm-text">
+            งวดที่มีอยู่ {storedCount} งวดจะถูกซ่อนและไม่นำมาคิดสถานะ — ข้อมูลยังเก็บไว้ เปิดกลับได้
+          </p>
+        </ConfirmDialog>
+      )}
+    </div>
+  )
+}
+
 // ---------- list ----------
-export default function TrackingInstallments({ installments, projectId, canEdit = false, onChanged, onOpenUpload }) {
+// hasInstallments=false: the project is set to "no billing installments" -> only a muted note (and the
+// switch for people who may edit) instead of the list, the add form and the checklists / templates.
+export default function TrackingInstallments({
+  installments, projectId, canEdit = false, onChanged, onOpenUpload, hasInstallments = true, onSetHasInstallments,
+}) {
   const toast = useToast()
   // Start with the first installment still to bill expanded; the choice is then
   // pinned so it does not collapse when that installment's status changes.
@@ -379,21 +487,44 @@ export default function TrackingInstallments({ installments, projectId, canEdit 
 
   const billed = installments.filter((i) => i.is_billed).length
   const counted = installments.filter((i) => i.status !== 'cancelled').length
+  // The switch keeps ONE position in both states (right under the header), so toggling never re-mounts it
+  // and the keyboard focus stays on it.
+  const billingSwitch = onSetHasInstallments ? (
+    <NoBillingSwitch key="billing-switch" hasInstallments={hasInstallments} storedCount={counted} onSet={onSetHasInstallments} />
+  ) : null
 
   return (
-    <div className="card trk-panel">
+    <div className="card trk-panel" data-testid="installments-panel">
       <div className="trk-panel-head">
         <h3 className="trk-panel-h" style={{ margin: 0 }}>
           <Icon name="layers" size={16} /> งวดงาน / งวดเบิก
-          {counted > 0 && <span className="muted small" style={{ fontWeight: 400 }}> · เบิกแล้ว {billed}/{counted} งวด</span>}
+          {hasInstallments && counted > 0 && (
+            <span className="muted small" style={{ fontWeight: 400 }}> · เบิกแล้ว {billed}/{counted} งวด</span>
+          )}
         </h3>
-        {canEdit && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAdding((v) => !v)} aria-expanded={adding}>
-            <Icon name="plus" size={13} /> เพิ่มงวด
-          </button>
+        {!hasInstallments ? (
+          <ToneBadge tone="mute">{NO_INSTALLMENTS_LABEL}</ToneBadge>
+        ) : (
+          canEdit && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAdding((v) => !v)} aria-expanded={adding}>
+              <Icon name="plus" size={13} /> เพิ่มงวด
+            </button>
+          )
         )}
       </div>
 
+      {billingSwitch}
+
+      {!hasInstallments ? (
+        <div className="trk-empty trk-no-billing" data-testid="no-billing-note">
+          {NO_INSTALLMENTS_NOTE}
+          <div className="small" style={{ marginTop: 4 }}>
+            ไม่นำงวดเบิกมาคิดสถานะของโครงการ
+            {canEdit && counted > 0 ? ` · งวดที่บันทึกไว้ ${counted} งวดถูกซ่อนไว้ (ข้อมูลยังเก็บไว้)` : ''}
+          </div>
+        </div>
+      ) : (
+      <>
       {adding && canEdit && (
         <form className="trk-edit" onSubmit={add}>
           <div className="trk-form-row">
@@ -441,6 +572,8 @@ export default function TrackingInstallments({ installments, projectId, canEdit 
             />
           ))}
         </div>
+      )}
+      </>
       )}
     </div>
   )

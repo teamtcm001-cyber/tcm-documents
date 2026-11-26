@@ -294,13 +294,15 @@ const isRlsError = (error) =>
 
 // What to throw for a failed write: AppError for session / permission problems, else the error itself.
 function writeError(error) {
+  // `cause` keeps the database error, so a caller can still recognise a specific refusal
+  // (e.g. BILLING_FLAG_FORBIDDEN) after it was turned into a generic AppError
   if (isJwtError(error)) {
     reportAuthProblem('expired');
-    return new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+    return new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized', { cause: error });
   }
   if (isRlsError(error)) {
     reportAuthProblem('denied');
-    return new AppError(NO_ACCESS_MESSAGE, 'no_access');
+    return new AppError(NO_ACCESS_MESSAGE, 'no_access', { cause: error });
   }
   return error;
 }
@@ -601,9 +603,42 @@ export function isPhoneColumnMissing(error) {
   return !msg && ['42703', 'PGRST204'].includes(String(error.code || ''));
 }
 
+// projects.has_installments ("this project has billing installments", default true) is added by
+// scripts/project-billing-flag.sql. Until that has been run the column is absent: reads treat a
+// missing value as true (see hasInstallments in utils/tracking.js) and a write fails with 42703 /
+// PGRST204 naming the column.
+export const BILLING_FLAG_MISSING_MESSAGE =
+  'บันทึกการตั้งค่า "ไม่มีงวดเบิก" ไม่ได้ — ต้องให้ผู้ดูแลระบบรันสคริปต์ project-billing-flag.sql ก่อน (ข้อมูลยังไม่ถูกเปลี่ยน)';
+
+// Only an error that actually NAMES the column (message / details / hint) counts: an unrelated 42703 /
+// PGRST204, or one with an empty message, is never mistaken for "the script was not run".
+export function isBillingFlagColumnMissing(error) {
+  if (!error) return false;
+  const code = String(error.code || '');
+  const text = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`;
+  if (!/has_installments/i.test(text)) return false;
+  if (['42703', 'PGRST204'].includes(code)) return true;
+  return !code && /could not find|does not exist|schema cache/i.test(text);
+}
+
+// Only an admin or the manager of THAT project may change the switch. The database enforces it with a
+// trigger that raises SQLSTATE 42501, message 'BILLING_FLAG_FORBIDDEN' (writeError has already turned that
+// into an AppError and fired the 'denied' access re-read; the original error is its `cause`).
+export const BILLING_FLAG_FORBIDDEN_MESSAGE = 'เฉพาะแอดมินหรือผู้ดูแลโครงการเท่านั้นที่เปิด/ปิดได้';
+export function isBillingFlagForbidden(error) {
+  for (const x of [error, error?.cause]) {
+    if (!x) continue;
+    if (String(x.code || '') === '42501' && /BILLING_FLAG_FORBIDDEN/.test(`${x.message || ''} ${x.details || ''}`)) return true;
+  }
+  return false;
+}
+
 // Returns the created row. If the row was created WITHOUT the phone because the
 // column does not exist yet, the returned row carries `_phoneNotSaved: true` so the
 // caller can tell the user (creating the project itself never fails for that).
+// `has_installments` is sent ONLY when it is false (the column default is true, so "has
+// installments" needs no write at all). If that column does not exist yet the project is
+// created without it and the row carries `_billingFlagNotSaved: true`.
 export async function createProject(projectData) {
   const user = await getCurrentUser();
   const insert = (fields) =>
@@ -612,20 +647,34 @@ export async function createProject(projectData) {
       .insert([{ ...fields, created_by: user.id }])
       .select();
 
-  const { project_co_phone, ...rest } = projectData || {};
+  const { project_co_phone, has_installments, ...rest0 } = projectData || {};
+  const rest = has_installments === false ? { ...rest0, has_installments: false } : rest0;
   const phone = normalizePhones(project_co_phone);
+  const flags = {};
+  // insert, and if only the optional has_installments column is unknown, insert again without it
+  const insertTolerant = async (fields) => {
+    const r = await insert(fields);
+    if (r.error && 'has_installments' in fields && isBillingFlagColumnMissing(r.error)) {
+      const { has_installments: _omit, ...without } = fields;
+      flags._billingFlagNotSaved = true;
+      return insert(without);
+    }
+    return r;
+  };
+  const withFlags = (row) => (row && Object.keys(flags).length ? { ...row, ...flags } : row);
   if (!phone) {
-    const { data, error } = await insert(rest);
+    const { data, error } = await insertTolerant(rest);
     if (error) throw error;
-    return data?.[0];
+    return withFlags(data?.[0]);
   }
 
-  const first = await insert({ ...rest, project_co_phone: phone });
-  if (!first.error) return first.data?.[0];
+  const first = await insertTolerant({ ...rest, project_co_phone: phone });
+  if (!first.error) return withFlags(first.data?.[0]);
   if (!isPhoneColumnMissing(first.error)) throw first.error;
-  const retry = await insert(rest);
+  const retry = await insertTolerant(rest);
   if (retry.error) throw retry.error;
-  return retry.data?.[0] ? { ...retry.data[0], _phoneNotSaved: true } : retry.data?.[0];
+  flags._phoneNotSaved = true;
+  return withFlags(retry.data?.[0]);
 }
 
 // ---- AI chat context: projects + file METADATA in two queries (no per-project loop,
@@ -1251,7 +1300,10 @@ export function fetchTrackingOverview() {
     return {
       data: (main.data || []).map((r) => ({
         ...r,
-        ready_to_bill_days: maxDays[r.project_id] ?? null,
+        // installment_summary is NOT filtered by projects.has_installments (its stored rows stay), so the
+        // aging of a project set to "no billing installments" is dropped here (computeHealth ignores it too).
+        // No filter on the query itself: it must keep working before project-billing-flag.sql is run.
+        ready_to_bill_days: r.has_installments === false ? null : maxDays[r.project_id] ?? null,
         project_co_phone: contacts[r.project_id]?.project_co_phone ?? null,
       })),
       error: null,
@@ -1661,7 +1713,7 @@ export async function updateProjectStatus(projectId, status, { previousStatus } 
   return row;
 }
 
-// updates: any subset of { start_date, end_date, project_co, project_co_phone, project_status },
+// updates: any subset of { start_date, end_date, project_co, project_co_phone, project_status, has_installments },
 // plus `previous_status` (audit line only). PARTIAL by design: a key that is `undefined` /
 // absent is neither validated nor written, so a form that sends only what the user changed
 // cannot overwrite what someone else saved meanwhile. '' / null for a provided key clears it
@@ -1676,6 +1728,8 @@ export async function updateProjectStatus(projectId, status, { previousStatus } 
 // EXCEPT when the phone is being cleared: there is nothing to store or clear, so the other
 // fields are saved without it (keeps editing dates / Project Co usable before fix-3).
 // The phone number is never written to the activity log.
+//
+// has_installments (boolean only) must be sent ON ITS OWN and goes through writeBillingFlag (below).
 export async function updateProjectTracking(projectId, updates = {}) {
   const has = (k) => updates[k] !== undefined;
   const payload = {};
@@ -1700,7 +1754,15 @@ export async function updateProjectTracking(projectId, updates = {}) {
     assertProjectStatus(updates.project_status);
     payload.status = updates.project_status;
   }
+  if (has('has_installments')) {
+    if (typeof updates.has_installments !== 'boolean') throw new Error('ค่าการตั้งค่างวดเบิกไม่ถูกต้อง');
+    payload.has_installments = updates.has_installments;
+  }
   if (Object.keys(payload).length === 0) throw new Error('ไม่มีข้อมูลที่ต้องบันทึก');
+  if ('has_installments' in payload) {
+    if (Object.keys(payload).length > 1) throw new Error('บันทึกการตั้งค่างวดเบิกแยกจากข้อมูลอื่นเท่านั้น');
+    return writeBillingFlag(projectId, payload.has_installments);
+  }
 
   // date order, using the stored value for a counterpart that is not being written
   if ('start_date' in payload || 'end_date' in payload) {
@@ -1759,6 +1821,44 @@ export async function updateProjectTracking(projectId, updates = {}) {
     await logStatusChange(projectId, updates.previous_status, payload.status);
   }
   return row;
+}
+
+// projects.has_installments ("โครงการนี้ไม่มีงวดเบิก" switch). Only admins and the project's manager may
+// change it (DB trigger -> 42501 'BILLING_FLAG_FORBIDDEN' -> BILLING_FLAG_FORBIDDEN_MESSAGE + 'denied' re-read).
+// A missing column (script not run) -> BILLING_FLAG_MISSING_MESSAGE.
+// The UPDATE is CONDITIONAL (only where the value differs), so a stale page or a double submit that sends
+// the value already stored writes nothing and adds no activity line; 0 rows is then told apart from an
+// RLS refusal by re-reading the row. Returns the row (`_unchanged: true` for such a no-op).
+async function writeBillingFlag(projectId, value) {
+  const res = await supabase
+    .from('projects')
+    .update({ has_installments: value })
+    .eq('id', projectId)
+    .neq('has_installments', value)
+    .select();
+  if (res.error) {
+    if (isBillingFlagColumnMissing(res.error)) throw new Error(BILLING_FLAG_MISSING_MESSAGE);
+    const e = writeError(res.error); // 42501 -> 'denied' access re-read, JWT -> 'expired'
+    if (isBillingFlagForbidden(e)) throw new AppError(BILLING_FLAG_FORBIDDEN_MESSAGE, 'forbidden', { cause: res.error });
+    throw trackingWriteError(e, 'บันทึกการตั้งค่างวดเบิกไม่สำเร็จ');
+  }
+  if (res.data && res.data.length > 0) {
+    try {
+      await logActivity(
+        projectId,
+        'tracking_update',
+        `แก้ไขข้อมูลติดตามงาน: ${value ? 'ตั้งค่าเป็นโครงการที่มีงวดเบิก' : 'ตั้งค่าเป็นโครงการที่ไม่มีงวดเบิก'}`
+      );
+    } catch (err) {
+      console.warn('logActivity (tracking_update) failed:', err?.message);
+    }
+    return res.data[0];
+  }
+  // 0 rows: the value was already stored (no-op) - or RLS filtered the row out
+  const cur = await supabase.from('projects').select('*').eq('id', projectId).maybeSingle();
+  if (!cur.error && cur.data && cur.data.has_installments === value) return { ...cur.data, _unchanged: true };
+  reportAuthProblem('denied');
+  throw new Error(PROJECT_NOT_UPDATED_MESSAGE);
 }
 
 // Bulk import: set projects.project_co ONLY while it is still NULL / empty at write time (a person may have filled

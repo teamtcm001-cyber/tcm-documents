@@ -9,6 +9,15 @@
 --
 -- WHAT THIS ADDS (nothing existing is dropped or rewritten)
 --   projects            + start_date, end_date, project_co            (columns)
+--                       + has_installments (boolean, default true; see section 1
+--                         and scripts/project-billing-flag.sql)
+--                       + trigger trg_projects_billing_flag_guard: only an admin or the
+--                         project's manager may change has_installments (42501
+--                         BILLING_FLAG_FORBIDDEN for anyone else signed in)
+--   RE-RUNNING after the per-person login (auth-01/02) is installed is safe: the
+--   legacy permissive policies of section 9 are then skipped (see its guard).
+--   Re-run project-tracking-fix-1/2/3.sql afterwards, in that order (this file
+--   re-creates the original trigger bodies that fix-1/fix-2 changed).
 --   progress_updates      append-only % complete log
 --   project_installments  billing installments (NO money amounts, by decision)
 --   installment_events    append-only audit log, written by a trigger
@@ -78,6 +87,108 @@ alter table public.projects add column if not exists project_co text;
 
 comment on column public.projects.project_co is
   'Responsible Project Coordinator display name (self-reported text, not a user reference).';
+
+-- has_installments: per-project switch "this project bills in installments" (งวดเบิก).
+-- false = e.g. a Hybrid project without billing installments: the tracking views report
+-- no installment-derived values for it (see 8c), so no installment rule can fire. The
+-- installment rows themselves are never touched - switching back shows them again.
+-- (Same definition as scripts/project-billing-flag.sql; keep the two in sync.)
+-- Added only when missing, so a re-run takes no exclusive lock on projects for it.
+do $flag$
+declare
+  v_type text; v_null text; v_def text;
+begin
+  select data_type, is_nullable, column_default into v_type, v_null, v_def
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'projects' and column_name = 'has_installments';
+  if not found then
+    alter table public.projects add column has_installments boolean not null default true;
+  else
+    if v_type <> 'boolean' then
+      raise exception 'public.projects.has_installments exists with type % (expected boolean) - fix it by hand first', v_type;
+    end if;
+    if v_def is distinct from 'true' then
+      alter table public.projects alter column has_installments set default true;
+    end if;
+    if v_null = 'YES' then
+      update public.projects set has_installments = true where has_installments is null;
+      alter table public.projects alter column has_installments set not null;
+    end if;
+  end if;
+end
+$flag$;
+
+comment on column public.projects.has_installments is
+  'true = the project bills in installments (งวดเบิก). false = no installments (e.g. Hybrid): '
+  'project_tracking_overview shows no installment-derived values; installment rows are kept, only hidden.';
+
+-- ----------------------------------------------------------------------------
+-- 1b. Who may CHANGE the switch: admin, or the manager (Project Co) of that project.
+--     (IDENTICAL to scripts/project-billing-flag.sql section 1b - keep the two in sync)
+--     RLS (projects_update = can_edit_project) still decides which rows an UPDATE sees;
+--     this BEFORE trigger additionally refuses editors. SECURITY DEFINER so the role
+--     helpers are reachable whatever the caller's privileges; search_path pinned.
+-- ----------------------------------------------------------------------------
+create or replace function public.tg_projects_billing_flag_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_ok boolean := false;
+begin
+  -- no end user (SQL editor, service role, migrations): unrestricted
+  if auth.uid() is null then
+    return new;
+  end if;
+  if tg_op = 'UPDATE' then
+    if new.has_installments is not distinct from old.has_installments then
+      return new;                 -- sent with its current value (full-form save): not a change
+    end if;
+  elsif new.has_installments is not false then
+    return new;                   -- INSERT with the default (true)
+  end if;
+  -- before the per-person login (auth-01) there are no roles to check
+  if to_regprocedure('public.is_admin()') is null then
+    return new;
+  end if;
+  v_ok := public.is_admin();
+  -- auth-04 (project managers) not installed: admins only
+  if not v_ok and to_regprocedure('public.is_project_manager(uuid)') is not null then
+    v_ok := public.is_project_manager(new.id);
+  end if;
+  if not coalesce(v_ok, false) then
+    raise exception 'BILLING_FLAG_FORBIDDEN'
+      using errcode = '42501',
+            detail  = 'เฉพาะแอดมินหรือผู้ดูแลโครงการเท่านั้นที่เปิด/ปิดการตั้งค่าไม่มีงวดเบิกได้',
+            hint    = 'Only an admin or the manager (Project Co) of this project may change projects.has_installments.';
+  end if;
+  return new;
+end $$;
+
+revoke all on function public.tg_projects_billing_flag_guard() from public, anon, authenticated;
+
+-- (re)create the trigger only when missing or different, so a re-run takes no lock on projects
+do $guard$
+begin
+  if not exists (
+    select 1 from pg_trigger t
+    where t.tgrelid = 'public.projects'::regclass
+      and t.tgname = 'trg_projects_billing_flag_guard'
+      and not t.tgisinternal
+      and t.tgenabled <> 'D'
+      and t.tgfoid = 'public.tg_projects_billing_flag_guard()'::regprocedure
+      and pg_get_triggerdef(t.oid) ~* 'BEFORE INSERT OR UPDATE OF has_installments ON public\.projects FOR EACH ROW'
+  ) then
+    drop trigger if exists trg_projects_billing_flag_guard on public.projects;
+    create trigger trg_projects_billing_flag_guard
+      before insert or update of has_installments on public.projects
+      for each row execute function public.tg_projects_billing_flag_guard();
+    raise notice 'created trigger trg_projects_billing_flag_guard on public.projects';
+  end if;
+end
+$guard$;
 
 do $$
 begin
@@ -391,7 +502,8 @@ select
               100.0 * (public.tcm_today() - p.start_date) / (p.end_date - p.start_date)
             )))::int
   end                                        as time_elapsed_pct,
-  (p.end_date - public.tcm_today())          as days_to_end          -- negative = past end date
+  (p.end_date - public.tcm_today())          as days_to_end,         -- negative = past end date
+  p.has_installments                         -- appended last (CREATE OR REPLACE may only add at the end)
 from public.projects p
 left join lateral (
   select u.percent_complete, u.as_of, u.note, u.updated_by, u.created_at
@@ -437,7 +549,8 @@ select
     when coalesce(d.req_total, 0) = 0           then 'no_required_docs'  -- checklist empty: NOT "ready"
     when d.req_attached = d.req_total           then 'ready'
     else                                             'missing'
-  end                         as docs_state
+  end                         as docs_state,
+  p.has_installments                                      -- informational only: rows are NOT filtered
 from public.project_installments i
 join public.projects p on p.id = i.project_id
 left join lateral (
@@ -452,6 +565,9 @@ left join lateral (
 ) d on true;
 
 -- 8c. one row per project for the cross-project dashboard (ONE query)
+--     has_installments = false: both laterals are gated on it, so every installment-
+--     derived column is 0 (counts) or NULL (next_*) and no installment rule can fire.
+--     The installment rows stay in their tables and in installment_summary.
 create or replace view public.project_tracking_overview
 with (security_invoker = on) as
 select
@@ -480,7 +596,8 @@ select
   n.days_until_planned                   as next_days_until_planned,
   n.docs_state                           as next_docs_state,
   n.required_docs_total                  as next_required_docs_total,
-  n.required_docs_attached               as next_required_docs_attached
+  n.required_docs_attached               as next_required_docs_attached,
+  pl.has_installments                                                -- appended last
 from public.project_progress_latest pl
 left join lateral (
   select
@@ -489,13 +606,13 @@ left join lateral (
     count(*) filter (where s.is_overdue)::int             as installments_overdue,
     count(*) filter (where s.status = 'returned')::int    as installments_returned
   from public.installment_summary s
-  where s.project_id = pl.project_id
+  where s.project_id = pl.project_id and pl.has_installments
 ) c on true
 left join lateral (
   select s.installment_id, s.installment_no, s.status, s.planned_bill_date,
          s.days_until_planned, s.docs_state, s.required_docs_total, s.required_docs_attached
   from public.installment_summary s
-  where s.project_id = pl.project_id and s.is_open_to_bill
+  where s.project_id = pl.project_id and pl.has_installments and s.is_open_to_bill
   order by s.planned_bill_date asc nulls last, s.installment_no asc
   limit 1
 ) n on true;
@@ -516,71 +633,100 @@ alter table public.installment_events          enable row level security;
 alter table public.installment_documents       enable row level security;
 alter table public.project_checklist_templates enable row level security;
 
-revoke all on public.progress_updates, public.project_installments,
-              public.installment_events, public.installment_documents,
-              public.project_checklist_templates
-  from public, anon, authenticated;
+-- RE-RUN GUARD: once the per-person login is installed (scripts/auth-01-foundation.sql:
+-- public.profiles + public.can_edit_project exist), table grants and policies of these
+-- tables belong to scripts/auth-02-enforce-rls.sql. Re-creating the legacy "using (true)"
+-- policies below would OR-open every project to every signed-in account and the REVOKE would
+-- drop the DELETE privilege of fix-2 / auth-02, so in that case they are skipped
+-- (RLS stays enabled above; if this run created a NEW table, re-run auth-02 for its policies).
+do $legacy_rls$
+declare
+  v_tbl text;
+begin
+  if to_regclass('public.profiles') is not null
+     and to_regprocedure('public.can_edit_project(uuid)') is not null then
+    raise notice 'per-person login detected: legacy grants/policies of the tracking tables NOT re-created (managed by auth-02-enforce-rls.sql).';
+    -- auth-01 installed but auth-02 not (yet): a tracking table with RLS on and NO policy
+    -- answers nothing to anybody. Say so loudly instead of leaving the app silently empty.
+    for v_tbl in
+      select c.relname::text from pg_class c
+      where c.relnamespace = 'public'::regnamespace and c.relkind = 'r' and c.relrowsecurity
+        and c.relname in ('progress_updates','project_installments','installment_events',
+                          'installment_documents','project_checklist_templates')
+        and not exists (select 1 from pg_policy p where p.polrelid = c.oid)
+      order by 1
+    loop
+      raise warning 'public.% has RLS on and NO policy: nobody can read or write it through the API. Run scripts/auth-02-enforce-rls.sql.', v_tbl;
+    end loop;
+  else
+    revoke all on public.progress_updates, public.project_installments,
+                  public.installment_events, public.installment_documents,
+                  public.project_checklist_templates
+      from public, anon, authenticated;
 
-grant select, insert         on public.progress_updates            to authenticated;
-grant select, insert, update on public.project_installments        to authenticated;
-grant select, insert         on public.installment_events          to authenticated;
-grant select, insert, update, delete on public.installment_documents       to authenticated;
-grant select, insert, update, delete on public.project_checklist_templates to authenticated;
+    grant select, insert         on public.progress_updates            to authenticated;
+    grant select, insert, update on public.project_installments        to authenticated;
+    grant select, insert         on public.installment_events          to authenticated;
+    grant select, insert, update, delete on public.installment_documents       to authenticated;
+    grant select, insert, update, delete on public.project_checklist_templates to authenticated;
 
--- progress_updates
-drop policy if exists "Authenticated can read progress" on public.progress_updates;
-create policy "Authenticated can read progress"
-  on public.progress_updates for select to authenticated using (true);
-drop policy if exists "Authenticated can add progress" on public.progress_updates;
-create policy "Authenticated can add progress"
-  on public.progress_updates for insert to authenticated with check (true);
+    -- progress_updates
+    drop policy if exists "Authenticated can read progress" on public.progress_updates;
+    create policy "Authenticated can read progress"
+      on public.progress_updates for select to authenticated using (true);
+    drop policy if exists "Authenticated can add progress" on public.progress_updates;
+    create policy "Authenticated can add progress"
+      on public.progress_updates for insert to authenticated with check (true);
 
--- project_installments
-drop policy if exists "Authenticated can read installments" on public.project_installments;
-create policy "Authenticated can read installments"
-  on public.project_installments for select to authenticated using (true);
-drop policy if exists "Authenticated can add installments" on public.project_installments;
-create policy "Authenticated can add installments"
-  on public.project_installments for insert to authenticated with check (true);
-drop policy if exists "Authenticated can update installments" on public.project_installments;
-create policy "Authenticated can update installments"
-  on public.project_installments for update to authenticated using (true) with check (true);
+    -- project_installments
+    drop policy if exists "Authenticated can read installments" on public.project_installments;
+    create policy "Authenticated can read installments"
+      on public.project_installments for select to authenticated using (true);
+    drop policy if exists "Authenticated can add installments" on public.project_installments;
+    create policy "Authenticated can add installments"
+      on public.project_installments for insert to authenticated with check (true);
+    drop policy if exists "Authenticated can update installments" on public.project_installments;
+    create policy "Authenticated can update installments"
+      on public.project_installments for update to authenticated using (true) with check (true);
 
--- installment_events (insert policy is required because the trigger is INVOKER)
-drop policy if exists "Authenticated can read installment events" on public.installment_events;
-create policy "Authenticated can read installment events"
-  on public.installment_events for select to authenticated using (true);
-drop policy if exists "Authenticated can add installment events" on public.installment_events;
-create policy "Authenticated can add installment events"
-  on public.installment_events for insert to authenticated with check (true);
+    -- installment_events (insert policy is required because the trigger is INVOKER)
+    drop policy if exists "Authenticated can read installment events" on public.installment_events;
+    create policy "Authenticated can read installment events"
+      on public.installment_events for select to authenticated using (true);
+    drop policy if exists "Authenticated can add installment events" on public.installment_events;
+    create policy "Authenticated can add installment events"
+      on public.installment_events for insert to authenticated with check (true);
 
--- installment_documents
-drop policy if exists "Authenticated can read installment documents" on public.installment_documents;
-create policy "Authenticated can read installment documents"
-  on public.installment_documents for select to authenticated using (true);
-drop policy if exists "Authenticated can add installment documents" on public.installment_documents;
-create policy "Authenticated can add installment documents"
-  on public.installment_documents for insert to authenticated with check (true);
-drop policy if exists "Authenticated can update installment documents" on public.installment_documents;
-create policy "Authenticated can update installment documents"
-  on public.installment_documents for update to authenticated using (true) with check (true);
-drop policy if exists "Authenticated can delete installment documents" on public.installment_documents;
-create policy "Authenticated can delete installment documents"
-  on public.installment_documents for delete to authenticated using (true);
+    -- installment_documents
+    drop policy if exists "Authenticated can read installment documents" on public.installment_documents;
+    create policy "Authenticated can read installment documents"
+      on public.installment_documents for select to authenticated using (true);
+    drop policy if exists "Authenticated can add installment documents" on public.installment_documents;
+    create policy "Authenticated can add installment documents"
+      on public.installment_documents for insert to authenticated with check (true);
+    drop policy if exists "Authenticated can update installment documents" on public.installment_documents;
+    create policy "Authenticated can update installment documents"
+      on public.installment_documents for update to authenticated using (true) with check (true);
+    drop policy if exists "Authenticated can delete installment documents" on public.installment_documents;
+    create policy "Authenticated can delete installment documents"
+      on public.installment_documents for delete to authenticated using (true);
 
--- project_checklist_templates
-drop policy if exists "Authenticated can read checklist templates" on public.project_checklist_templates;
-create policy "Authenticated can read checklist templates"
-  on public.project_checklist_templates for select to authenticated using (true);
-drop policy if exists "Authenticated can add checklist templates" on public.project_checklist_templates;
-create policy "Authenticated can add checklist templates"
-  on public.project_checklist_templates for insert to authenticated with check (true);
-drop policy if exists "Authenticated can update checklist templates" on public.project_checklist_templates;
-create policy "Authenticated can update checklist templates"
-  on public.project_checklist_templates for update to authenticated using (true) with check (true);
-drop policy if exists "Authenticated can delete checklist templates" on public.project_checklist_templates;
-create policy "Authenticated can delete checklist templates"
-  on public.project_checklist_templates for delete to authenticated using (true);
+    -- project_checklist_templates
+    drop policy if exists "Authenticated can read checklist templates" on public.project_checklist_templates;
+    create policy "Authenticated can read checklist templates"
+      on public.project_checklist_templates for select to authenticated using (true);
+    drop policy if exists "Authenticated can add checklist templates" on public.project_checklist_templates;
+    create policy "Authenticated can add checklist templates"
+      on public.project_checklist_templates for insert to authenticated with check (true);
+    drop policy if exists "Authenticated can update checklist templates" on public.project_checklist_templates;
+    create policy "Authenticated can update checklist templates"
+      on public.project_checklist_templates for update to authenticated using (true) with check (true);
+    drop policy if exists "Authenticated can delete checklist templates" on public.project_checklist_templates;
+    create policy "Authenticated can delete checklist templates"
+      on public.project_checklist_templates for delete to authenticated using (true);
+  end if;
+end
+$legacy_rls$;
 
 -- views: signed-in app users only
 revoke all on public.project_progress_latest, public.installment_summary,

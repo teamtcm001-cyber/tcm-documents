@@ -4,7 +4,7 @@
 --
 -- !! DESTRUCTIVE !!  This permanently deletes ALL progress history, installments,
 -- audit events, document checklists and templates created by the app, plus the
--- projects.start_date / end_date / project_co columns and their data.
+-- projects.start_date / end_date / project_co / has_installments columns and their data.
 -- Export first if you might need any of it (Table Editor -> Export CSV).
 --
 -- If projects.start_date / end_date / project_co already existed BEFORE the
@@ -39,5 +39,8 @@ alter table public.projects drop constraint if exists projects_period_chk;
 alter table public.projects drop column if exists start_date;
 alter table public.projects drop column if exists end_date;
 alter table public.projects drop column if exists project_co;
+drop trigger if exists trg_projects_billing_flag_guard on public.projects;
+drop function if exists public.tg_projects_billing_flag_guard();
+alter table public.projects drop column if exists has_installments;   -- project-billing-flag.sql
 
 commit;

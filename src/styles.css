@@ -938,6 +938,12 @@ button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus
 .trk-reasons svg { flex-shrink: 0; margin-top: 3px; }
 .trk-hint { font-size: 12px; color: var(--gray-500); margin-top: 4px; }
 .trk-empty { padding: 16px; text-align: center; color: var(--gray-500); font-size: 14px; background: var(--bg); border-radius: 10px; }
+.trk-billing-switch-wrap { margin: 0 0 14px; }
+.trk-billing-switch { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; cursor: pointer; min-height: 32px; }
+.trk-billing-switch input { width: 18px; height: 18px; margin: 0; cursor: pointer; }
+.trk-billing-switch input[aria-disabled='true'] { cursor: progress; opacity: 0.6; }
+.trk-billing-switch input:focus-visible { outline: 2px solid var(--navy, #1F3A5F); outline-offset: 2px; }
+.trk-no-billing-col { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 
 /* progress meter: bar = % complete, tick = time elapsed */
 .trk-meter { padding: 6px 0 2px; }
@@ -974,7 +980,8 @@ button:focus-visible, .trk-card:focus-visible, input:focus-visible, select:focus
 .trk-head-name { font-size: 20px; }
 .trk-facts, .trk-inst-facts { display: flex; flex-wrap: wrap; gap: 12px 32px; margin-top: 14px; font-size: 14px; align-items: flex-start; }
 .trk-inst-facts { margin-top: 0; }
-.trk-detail-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+.trk-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.trk-detail-grid > * { min-width: 0; }
 .trk-panel { padding: 18px 22px; }
 .trk-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .trk-panel-h { font-size: 16px; display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }

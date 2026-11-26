@@ -150,6 +150,8 @@ function sanitizeBrief(b) {
     projectCo: cline(b.projectCo, LIMITS.NOTE_CHARS),
     // false = the client could not load tracking data (NOT the same as "no installments")
     trackingAvailable: b.trackingAvailable !== false,
+    // true ONLY for the boolean true: the project is set to "no billing installments" (projects.has_installments = false)
+    noInstallments: b.noInstallments === true,
     contract: null,
     progress: null,
     installments: [],
@@ -170,7 +172,8 @@ function sanitizeBrief(b) {
       reasons: (Array.isArray(p.reasons) ? p.reasons : []).slice(0, LIMITS.REASONS).map((r) => cline(r, 200)).filter(Boolean),
     }
   }
-  if (Array.isArray(b.installments)) {
+  // a "no billing installments" project never carries installments, whatever the client sent
+  if (Array.isArray(b.installments) && !out.noInstallments) {
     out.installments = b.installments.slice(0, LIMITS.INSTALLMENTS).map(sanitizeInstallment).filter(Boolean)
   }
   return out
@@ -192,7 +195,9 @@ function renderBrief(b) {
     L.push(parts.join(' | '))
     if (p.reasons.length) L.push(`เหตุผลสถานะ: ${p.reasons.join('; ')}`)
   }
-  if (b.installments.length) {
+  if (b.noInstallments) {
+    L.push('งวดงาน: โครงการนี้ไม่มีงวดเบิก (ตั้งค่าไว้)')
+  } else if (b.installments.length) {
     L.push(`งวดงาน (${b.installments.length}):`)
     for (const i of b.installments) {
       const f = [`งวด ${i.no || '?'}${i.title ? ` ${i.title}` : ''}`]
@@ -453,6 +458,8 @@ function sanitizeGrounding(g) {
       projectsTotal: n(d.projectsTotal),
       projectsChecked: n(d.projectsChecked),
       projectsWithoutInstallments: n(d.projectsWithoutInstallments),
+      // projects set to "no billing installments" (counted apart from "no installment data")
+      projectsNoBilling: n(d.projectsNoBilling),
       projectsUnreadable: n(d.projectsUnreadable),
       projectsNotRead: n(d.projectsNotRead),
       projectsWithMissing: n(d.projectsWithMissing),
@@ -485,6 +492,7 @@ function renderDocsScan(d) {
   } else {
     L.push('- ไม่พบงวดที่เอกสารเบิกยังขาดเลย ในโครงการที่ตรวจแล้ว')
   }
+  if (d.projectsNoBilling) L.push(`- ${d.projectsNoBilling} โครงการไม่มีงวดเบิก (ตั้งค่าไว้) — ไม่มีเอกสารเบิกที่ต้องตรวจ (ไม่ใช่ "ขาด" และไม่ใช่ "ตรวจไม่ได้")`)
   if (d.projectsWithoutInstallments) L.push(`- ${d.projectsWithoutInstallments} โครงการไม่มีข้อมูลงวดในระบบ (ตรวจไม่ได้ ไม่ใช่ "ครบ")`)
   if (d.projectsUnreadable) L.push(`- ${d.projectsUnreadable} โครงการอ่านข้อมูลงวดไม่สำเร็จ (ตรวจสอบไม่ได้ในตอนนี้)`)
   if (d.projectsNotRead) L.push(`- ${d.projectsNotRead} โครงการยังไม่ได้ตรวจ (เกินขีดจำกัดการอ่าน)`)
@@ -583,7 +591,7 @@ INVENTORY คือรายการชื่อไฟล์ ใช้เพื
 7. สไตล์: ภาษาไทยกระชับ มืออาชีพ สำหรับวิศวกร/PM; การสรุปให้แบ่งเป็นหัวข้อสั้นๆ พร้อม bullet ขึ้นต้นด้วย "• " ความยาวไม่เกินประมาณ 250 คำ (ไม่นับป้ายแหล่งที่มา) เว้นแต่ผู้ใช้ขอรายละเอียด; ใช้ **ตัวหนา** ได้สำหรับหัวข้อ; เขียนวันที่เป็น พ.ศ. แบบย่อ เช่น 15 ต.ค. 69 (แปลงจาก ISO ให้ถูกต้อง; วันที่ใน BRIEFS ถูกแปลงให้แล้ว); เปอร์เซ็นต์เป็นจำนวนเต็ม
 8. ตอบเป็น JSON อย่างเดียว รูปแบบเดิม สำหรับคำตอบแบบ grounded ใช้ {"intent":"summary","reply":"…","fileIds":["…"]} (ใน reply ขึ้นบรรทัดใหม่ได้ด้วย \\n)
 9. ห้ามเขียนป้ายกำกับอย่าง [P1], [P2] ฯลฯ ลงใน reply เด็ดขาด ป้ายเหล่านั้นใช้ภายในเท่านั้น ให้อ้างอิงแหล่งที่มาด้วยชื่อไฟล์ (และชุด/ครั้งที่สำหรับรายงานการประชุม) เท่านั้น
-10. ห้ามสรุปว่า "ไม่มีงวด / ไม่มีอะไรค้าง / เป็นไปตามแผน" จากการที่ไม่มีข้อมูลติดตามงาน ถ้า BRIEFS ระบุว่า "ไม่สามารถโหลดข้อมูลติดตามงานได้" ให้แจ้งว่าตรวจสอบสถานะงวดไม่ได้ในตอนนี้ (ไม่ใช่ว่าไม่มีงวด)
+10. ห้ามสรุปว่า "ไม่มีงวด / ไม่มีอะไรค้าง / เป็นไปตามแผน" จากการที่ไม่มีข้อมูลติดตามงาน ถ้า BRIEFS ระบุว่า "ไม่สามารถโหลดข้อมูลติดตามงานได้" ให้แจ้งว่าตรวจสอบสถานะงวดไม่ได้ในตอนนี้ (ไม่ใช่ว่าไม่มีงวด) ส่วนโครงการที่ BRIEFS ระบุ "โครงการนี้ไม่มีงวดเบิก (ตั้งค่าไว้)" ให้บอกว่าโครงการนี้ไม่มีงวดเบิก (ตั้งค่าไว้) ห้ามเรียกว่า "ไม่มีข้อมูลงวด" / "ตรวจไม่ได้" / "ยังไม่มีงวด" และห้ามบอกว่างวดหรือเอกสารเบิกของโครงการนั้นขาดหรือค้าง
 11. ถ้า COVERAGE ระบุ "แสดง N จาก M โครงการ" ให้บอกผู้ใช้ว่า "แสดง N จาก M โครงการ" และห้ามอ้างว่าข้อมูลครบทุกโครงการ
 12. ถ้า COVERAGE ระบุว่าอ่านเอกสารเพียงบางส่วน (partial) ให้บอกสั้นๆ ว่าสรุปนี้อิงจากส่วนต้นของเอกสาร / เพียง N จาก M ไฟล์ ตามตัวเลขที่ระบุ${extraRules(g)}`
 }
@@ -595,7 +603,7 @@ function extraRules(g) {
   const out = []
   if (g?.docsScan) {
     out.push(`
-${++n}. มีบล็อก DOCS_SCAN: เป็นผลตรวจที่ระบบคำนวณจากข้อมูลจริงของทุกโครงการ เมื่อผู้ใช้ถามว่าโครงการหรืองวดไหน "เอกสารเบิกยังขาด" ให้ประโยคแรกของ reply ตอบคำถามนี้ตรงๆ ตาม DOCS_SCAN (โครงการไหนขาด กี่งวด หรือ "ไม่พบงวดที่เอกสารเบิกยังขาด") ก่อนแล้วจึงให้รายละเอียด (ถ้ามีรายงานการประชุมด้วย ให้ตามด้วยบรรทัดอ้างอิงการประชุมหลังประโยคนี้) ห้ามเปลี่ยนไปตอบเรื่องงวดที่ยังไม่เบิก ความคืบหน้า หรือเลยกำหนด แทนคำถามนี้ และห้ามระบุว่าโครงการใดขาดเอกสารนอกจากที่ DOCS_SCAN ระบุ โครงการที่ไม่มีข้อมูลงวด/อ่านไม่สำเร็จ/ยังไม่ได้ตรวจ ต้องบอกว่า "ตรวจไม่ได้" ไม่ใช่ "เอกสารครบ"`)
+${++n}. มีบล็อก DOCS_SCAN: เป็นผลตรวจที่ระบบคำนวณจากข้อมูลจริงของทุกโครงการ เมื่อผู้ใช้ถามว่าโครงการหรืองวดไหน "เอกสารเบิกยังขาด" ให้ประโยคแรกของ reply ตอบคำถามนี้ตรงๆ ตาม DOCS_SCAN (โครงการไหนขาด กี่งวด หรือ "ไม่พบงวดที่เอกสารเบิกยังขาด") ก่อนแล้วจึงให้รายละเอียด (ถ้ามีรายงานการประชุมด้วย ให้ตามด้วยบรรทัดอ้างอิงการประชุมหลังประโยคนี้) ห้ามเปลี่ยนไปตอบเรื่องงวดที่ยังไม่เบิก ความคืบหน้า หรือเลยกำหนด แทนคำถามนี้ และห้ามระบุว่าโครงการใดขาดเอกสารนอกจากที่ DOCS_SCAN ระบุ โครงการที่ไม่มีข้อมูลงวด/อ่านไม่สำเร็จ/ยังไม่ได้ตรวจ ต้องบอกว่า "ตรวจไม่ได้" ไม่ใช่ "เอกสารครบ" ส่วนโครงการที่ DOCS_SCAN ระบุว่า "ไม่มีงวดเบิก (ตั้งค่าไว้)" ให้บอกแยกเป็นจำนวนต่างหาก (เช่น "N โครงการไม่มีงวดเบิก (ตั้งค่าไว้)") ห้ามนับรวมกับ "ตรวจไม่ได้" หรือ "ไม่มีข้อมูลงวด"`)
   }
   if (g?.empty) {
     out.push(`

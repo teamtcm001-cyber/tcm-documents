@@ -19,7 +19,7 @@
 //   * bounded size (<= 6 briefs for named projects, <= 12 for portfolio questions, <= 14 passages, <= ~40k passage chars, each <= 4000),
 //   * the context files are never mutated.
 
-import { computeHealth, HEALTH_ORDER, STATUS_LABEL, OPEN_STATUSES, splitCoNames, fmtThaiDate } from './tracking.js'
+import { computeHealth, HEALTH_ORDER, STATUS_LABEL, OPEN_STATUSES, splitCoNames, fmtThaiDate, hasInstallments } from './tracking.js'
 
 export const GROUNDING_LIMITS = {
   BRIEFS: 6, // named projects ("summarize project X")
@@ -1187,6 +1187,8 @@ const hasMissingDocsBrief = (i) => i?.docs?.state === 'missing' && !CLOSED_OUT.i
  *   installmentsFailed: the installment read failed (the brief then says trackingAvailable:false)
  * `trackingAvailable:false` is emitted when the overview row is missing or the installment read failed,
  * so "no installments" can never be mistaken for "could not load".
+ * `noInstallments:true` (boolean, only when set) = the project is switched to "no billing installments"
+ * (overview row has_installments === false): no installments are listed even if some are still stored.
  */
 export function buildProjectBrief(project, trackingRow, installments = [], { onlyAttention = false, installmentsFailed = false } = {}) {
   const row = trackingRow || null
@@ -1209,7 +1211,8 @@ export function buildProjectBrief(project, trackingRow, installments = [], { onl
     }
   }
 
-  let inst = Array.isArray(installments) ? [...installments] : []
+  const noBilling = !!row && !hasInstallments(row)
+  let inst = !noBilling && Array.isArray(installments) ? [...installments] : []
   inst.sort((a, b) => (a.installment_no || 0) - (b.installment_no || 0))
   if (onlyAttention) inst = inst.filter(needsAttention)
 
@@ -1223,7 +1226,9 @@ export function buildProjectBrief(project, trackingRow, installments = [], { onl
     progress,
     installments: inst.slice(0, GROUNDING_LIMITS.INSTALLMENTS).map(briefInstallment),
   }
-  if (!row || installmentsFailed) brief.trackingAvailable = false
+  if (noBilling) brief.noInstallments = true
+  // a "no installments" project never needed its installments, so a failed read of them is irrelevant
+  else if (!row || installmentsFailed) brief.trackingAvailable = false
   return brief
 }
 
@@ -1236,7 +1241,8 @@ export function buildProjectBrief(project, trackingRow, installments = [], { onl
  * @returns {object[]} up to `limit` rows
  */
 export function selectBriefRows(rows, { limit = GROUNDING_LIMITS.BRIEFS, docsFocus = false, missingIds = null } = {}) {
-  const missing = (row) => (missingIds ? missingIds.has(String(row.project_id)) : row.next_docs_state === 'missing')
+  const missing = (row) =>
+    hasInstallments(row) && (missingIds ? missingIds.has(String(row.project_id)) : row.next_docs_state === 'missing')
   const decorated = (rows || []).map((row) => ({
     row,
     level: computeHealth(row).level,
@@ -1246,7 +1252,7 @@ export function selectBriefRows(rows, { limit = GROUNDING_LIMITS.BRIEFS, docsFoc
     (a, b) =>
       (docsFocus ? a.docsMissing - b.docsMissing : 0) ||
       HEALTH_ORDER[a.level] - HEALTH_ORDER[b.level] ||
-      (b.row.installments_overdue || 0) - (a.row.installments_overdue || 0) ||
+      (hasInstallments(b.row) ? b.row.installments_overdue || 0 : 0) - (hasInstallments(a.row) ? a.row.installments_overdue || 0 : 0) ||
       String(a.row.project_code || '').localeCompare(String(b.row.project_code || ''))
   )
   return decorated.slice(0, limit).map((d) => d.row)
@@ -1254,7 +1260,7 @@ export function selectBriefRows(rows, { limit = GROUNDING_LIMITS.BRIEFS, docsFoc
 
 // Does the overview row suggest the project has installments worth fetching?
 const hasOpenWork = (row) =>
-  (row.installments_total || 0) > 0 && (!!row.next_installment_id || (row.installments_overdue || 0) > 0 || (row.installments_returned || 0) > 0)
+  hasInstallments(row) && (row.installments_total || 0) > 0 && (!!row.next_installment_id || (row.installments_overdue || 0) > 0 || (row.installments_returned || 0) > 0)
 
 // ---------- 6. orchestration ----------
 /**
@@ -1343,7 +1349,8 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
     briefs = await Promise.all(
       plan.projects.map(async (p) => {
         const row = rows?.find((r) => String(r.project_id) === String(p.id)) || null
-        const res = row ? await fetchInst(p.id) : { ok: false, data: [] }
+        // a project set to "no billing installments" needs no installment read at all
+        const res = !row ? { ok: false, data: [] } : hasInstallments(row) ? await fetchInst(p.id) : { ok: true, data: [] }
         return buildProjectBrief(p, row, res.data, { installmentsFailed: !res.ok })
       })
     )
@@ -1353,7 +1360,10 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
     let missingIds = null
     if (plan.docsFocus) {
       // documents question: look at EVERY project's installments (bounded), not just the next one
-      const readable = rows.filter((r) => (r.installments_total || 0) > 0).slice(0, MAX_PORTFOLIO_INSTALLMENT_READS)
+      // projects switched to "no billing installments" are counted on their own (projectsNoBilling),
+      // never read and never reported as "no installment data" / "could not check"
+      const billable = (r) => hasInstallments(r) && (r.installments_total || 0) > 0
+      const readable = rows.filter(billable).slice(0, MAX_PORTFOLIO_INSTALLMENT_READS)
       await Promise.all(readable.map(async (r) => instById.set(String(r.project_id), await fetchInst(r.project_id))))
       missingIds = new Set()
       // A deterministic answer to "which projects miss billing documents", computed from the raw
@@ -1372,17 +1382,20 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
           missingProjects.push(String(row?.project_code || row?.project_name || id).slice(0, 50))
         }
       }
-      const withInstallments = rows.filter((r) => (r.installments_total || 0) > 0).length
+      const withInstallments = rows.filter(billable).length
+      const projectsNoBilling = rows.filter((r) => !hasInstallments(r)).length
       docsScan = {
         projectsTotal: rows.length,
         projectsChecked: instById.size - projectsUnreadable,
-        projectsWithoutInstallments: rows.length - withInstallments,
+        projectsWithoutInstallments: rows.length - withInstallments - projectsNoBilling,
         projectsUnreadable,
         projectsNotRead: Math.max(0, withInstallments - readable.length),
         projectsWithMissing: missingIds.size,
         installmentsMissing,
         missingProjects: missingProjects.slice(0, GROUNDING_LIMITS.PORTFOLIO_BRIEFS),
       }
+      // only when some project is set to "no billing installments": otherwise the request stays exactly as before
+      if (projectsNoBilling > 0) docsScan.projectsNoBilling = projectsNoBilling
     }
     const picked = selectBriefRows(rows, { limit: GROUNDING_LIMITS.PORTFOLIO_BRIEFS, docsFocus: plan.docsFocus, missingIds })
     briefs = await Promise.all(
@@ -1454,6 +1467,8 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
 // ---------- 7. deterministic answers when the AI is unavailable ----------
 const HEALTH_TH = { red: 'ต้องดำเนินการ', amber: 'ควรติดตาม', green: 'ปกติ' }
 export const TRACKING_FAILED_TEXT = 'โหลดข้อมูลติดตามงานไม่สำเร็จ ลองใหม่อีกครั้ง'
+export const NO_BILLING_BRIEF_TEXT = 'งวดงาน: โครงการนี้ไม่มีงวดเบิก (ตั้งค่าไว้)'
+export const NO_BILLING_SCAN_TEXT = 'โครงการไม่มีงวดเบิก (ตั้งค่าไว้)'
 export const portfolioCapNote = (shown, total) =>
   Number.isFinite(total) && Number.isFinite(shown) && shown < total ? `แสดง ${shown} จาก ${total} โครงการ` : ''
 
@@ -1481,10 +1496,23 @@ export function localTrackingAnswer(query, briefs, info = {}) {
   const q = norm(query)
   const docsQ = /เอกสาร|ขาด/.test(q)
   const lines = []
-  const list = docsQ ? ok.filter((b) => b.installments.some(hasMissingDocsBrief)) : ok
+  const list = docsQ ? ok.filter((b) => !b.noInstallments && b.installments.some(hasMissingDocsBrief)) : ok
   const failed = briefs.filter((b) => b.trackingAvailable === false)
   const cap = portfolioCapNote(info.projectsShown, info.projectsTotal)
-  if (docsQ && !list.length) lines.push('ไม่พบงวดที่เอกสารเบิกยังขาดในโครงการที่โหลดข้อมูลได้ (ตามข้อมูลติดตามงานในระบบ)')
+  const checkedSome = ok.some((b) => !b.noInstallments) || (info.docsScan?.projectsChecked || 0) > 0
+  if (docsQ && !list.length && checkedSome) lines.push('ไม่พบงวดที่เอกสารเบิกยังขาดในโครงการที่โหลดข้อมูลได้ (ตามข้อมูลติดตามงานในระบบ)')
+  // documents question: projects set to "no billing installments" get their own line (after the answer
+  // itself), never "no installment data" / "could not check"
+  let noBillingLine = ''
+  if (docsQ) {
+    const noBillingBriefs = ok.filter((b) => b.noInstallments)
+    const scanned = Number.isFinite(info.docsScan?.projectsNoBilling) ? info.docsScan.projectsNoBilling : null
+    const n = scanned !== null ? Math.max(scanned, noBillingBriefs.length) : noBillingBriefs.length
+    if (n > 0) {
+      const codes = scanned === null ? noBillingBriefs.map((b) => b.code || b.name).filter(Boolean) : []
+      noBillingLine = `${n} ${NO_BILLING_SCAN_TEXT}${codes.length ? `: ${codes.join(', ')}` : ''}`
+    }
+  }
   for (const b of list) {
     lines.push(`**${b.code || ''} ${b.name || ''}**`.trim())
     if (b.progress) {
@@ -1493,6 +1521,7 @@ export function localTrackingAnswer(query, briefs, info = {}) {
       lines.push(`${pct}${pr.timeElapsedPct != null ? ` · เวลาตามสัญญาผ่านไป ${pr.timeElapsedPct}%` : ''} · สถานะ: ${HEALTH_TH[pr.health] || '-'}`)
       for (const r of pr.reasons) lines.push(`• ${r}`)
     }
+    if (b.noInstallments) lines.push(`• ${NO_BILLING_BRIEF_TEXT}`)
     for (const i of b.installments) {
       if (docsQ && !hasMissingDocsBrief(i)) continue
       if (!docsQ && !OPEN_STATUSES.includes(i.status) && !hasMissingDocsBrief(i)) continue
@@ -1501,6 +1530,7 @@ export function localTrackingAnswer(query, briefs, info = {}) {
     }
     lines.push('')
   }
+  if (noBillingLine) lines.push(noBillingLine)
   for (const b of failed) lines.push(`${`**${b.code || ''} ${b.name || ''}**`.trim()} — ${TRACKING_FAILED_TEXT}`)
   if (cap) lines.push(cap)
   return lines.join('\n').trim() || null
@@ -1515,7 +1545,11 @@ export function localAnswer(query, plan, built, ctx) {
   if (plan.needsProject) return needProjectMessage(ctx?.projects, ctx?.files)
   if (!plan.trackingOnly) return null
   if (built?.trackingFailed) return TRACKING_FAILED_TEXT
-  return localTrackingAnswer(query, built?.briefs || [], { projectsTotal: built?.projectsTotal, projectsShown: built?.projectsShown })
+  return localTrackingAnswer(query, built?.briefs || [], {
+    projectsTotal: built?.projectsTotal,
+    projectsShown: built?.projectsShown,
+    docsScan: built?.grounding?.docsScan || null,
+  })
 }
 
 /** [1,2,3,5] -> "1–3, 5" */
