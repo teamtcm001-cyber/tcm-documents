@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { uploadToDrive, discardDriveUpload } from '../utils/googleDrive.js';
 import { MEMBER_ROLES } from '../utils/roles.js';
+import { isOcrNoText } from '../utils/format.js';
 import {
   todayTH, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, ALL_STATUSES, CLEARS_BILLED_DATE,
   phoneError, normalizePhones, PROJECT_STATUSES,
@@ -710,7 +711,8 @@ export async function fetchFileContents({ onError } = {}) {
       onError?.(error);
       return out;
     }
-    for (const r of data || []) out[r.id] = r.content_text;
+    // "OCR found no text" markers are not content (see isOcrNoText)
+    for (const r of data || []) if (!isOcrNoText(r.content_text)) out[r.id] = r.content_text;
     if (!data || data.length < PAGE) break;
   }
   return out;
@@ -1168,7 +1170,7 @@ export async function fetchStats() {
 // are self-reported display names (see the SECURITY note in the SQL file).
 
 export const TRACKING_NOT_INSTALLED_MESSAGE =
-  'ยังไม่ได้ติดตั้งโครงสร้างข้อมูลติดตามงาน — ให้ผู้ดูแลรัน scripts/project-tracking.sql ใน Supabase SQL Editor';
+  'ยังไม่ได้ติดตั้งโครงสร้างข้อมูลเบิกงวดงาน — ให้ผู้ดูแลรัน scripts/project-tracking.sql ใน Supabase SQL Editor';
 
 // Postgres: 42P01 undefined_table, 42703 undefined_column, 42883 undefined_function
 // PostgREST: PGRST200 (no such relationship), PGRST204 (column not in cache), PGRST205 (table/view not in cache)
@@ -1812,7 +1814,7 @@ export async function updateProjectTracking(projectId, updates = {}) {
   if ('project_co_phone' in payload) parts.push('แก้ไขเบอร์ติดต่อ'); // never the number itself
   if (parts.length > 0) {
     try {
-      await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลติดตามงาน: ${parts.join(', ')}`);
+      await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลเบิกงวดงาน: ${parts.join(', ')}`);
     } catch (err) {
       console.warn('logActivity (tracking_update) failed:', err?.message);
     }
@@ -1847,7 +1849,7 @@ async function writeBillingFlag(projectId, value) {
       await logActivity(
         projectId,
         'tracking_update',
-        `แก้ไขข้อมูลติดตามงาน: ${value ? 'ตั้งค่าเป็นโครงการที่มีงวดเบิก' : 'ตั้งค่าเป็นโครงการที่ไม่มีงวดเบิก'}`
+        `แก้ไขข้อมูลเบิกงวดงาน: ${value ? 'ตั้งค่าเป็นโครงการที่มีงวดเบิก' : 'ตั้งค่าเป็นโครงการที่ไม่มีงวดเบิก'}`
       );
     } catch (err) {
       console.warn('logActivity (tracking_update) failed:', err?.message);
@@ -1880,7 +1882,7 @@ export async function setProjectCoIfEmpty(projectId, text) {
   if (res.error) throw writeError(res.error);
   if (!res.data || res.data.length === 0) return 'kept';
   try {
-    await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลติดตามงาน: Project Co=${v} (นำเข้าจาก Excel)`);
+    await logActivity(projectId, 'tracking_update', `แก้ไขข้อมูลเบิกงวดงาน: Project Co=${v} (นำเข้าจาก Excel)`);
   } catch (err) {
     console.warn('logActivity (tracking_update) failed:', err?.message);
   }

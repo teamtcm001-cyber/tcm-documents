@@ -120,12 +120,12 @@ function getInstallmentsCached(projectId) {
   return entry.promise
 }
 
-const CAPTION = 'สรุปโดย AI จากเอกสารและข้อมูลติดตามงานในระบบ — ตรวจสอบกับเอกสารต้นฉบับก่อนใช้งานจริง'
+const CAPTION = 'สรุปโดย AI จากเอกสารและข้อมูลเบิกงวดงานในระบบ — ตรวจสอบกับเอกสารต้นฉบับก่อนใช้งานจริง'
 const NOTE_LATEST = '“ล่าสุด” ดูจากวันที่อัปโหลดไฟล์ ไม่ใช่วันที่ในเอกสาร'
 const NOTE_MEETINGS_BY_UPLOAD = 'ชุดนี้เรียงตามวันที่อัปโหลด เพราะชื่อไฟล์ไม่มีเลขครั้ง/วันที่'
 const NOTE_TRUNCATED = 'คำตอบถูกตัดเพราะยาวเกินไป ลองถามให้เจาะจงขึ้น'
 const NOTE_AI_DOWN_FILES = 'ขณะนี้ AI สรุปไม่ได้ — แสดงผลค้นหาไฟล์แทน'
-const NOTE_AI_DOWN_TRACKING = 'ขณะนี้ AI สรุปไม่ได้ — แสดงข้อมูลติดตามงานจากระบบแทน'
+const NOTE_AI_DOWN_TRACKING = 'ขณะนี้ AI สรุปไม่ได้ — แสดงข้อมูลเบิกงวดงานจากระบบแทน'
 const WAIT_CONTENT_MS = 20000
 
 const welcomeText = (exampleProject) =>
@@ -249,7 +249,8 @@ export default function AIChat({ open, onClose }) {
     try {
       // Try Claude API first (if configured) — send recent turns so multi-step
       // conversations (e.g. the permit document checklist) keep context
-      const history = msgs.filter((m) => !m.welcome).slice(-12).map((m) => ({ role: m.role, text: m.text }))
+      // [Ref n] numbers are assigned per answer: old ones must not leak into the next request (they would mean other files)
+      const history = msgs.filter((m) => !m.welcome).slice(-12).map((m) => ({ role: m.role, text: String(m.text ?? '').replace(/\s?\[Ref \d{1,3}\]/g, '') }))
       const lastBot = [...msgs].reverse().find((m) => m.role === 'bot' && !m.welcome)
       if (!ctxReady) {
         try {
@@ -300,11 +301,13 @@ export default function AIChat({ open, onClose }) {
       let usedAI = 'local'
       const notes = []
 
+      let localTrackingAnswer = false
       if (!result) {
         // Fallback to local rule-based search; tracking questions get a deterministic answer
         const local = grounded ? localAnswer(text, plan, built, liveCtx) : null
         if (local) {
           result = { intent: 'answer', reply: local }
+          localTrackingAnswer = true
           if (!built?.trackingFailed) notes.push(NOTE_AI_DOWN_TRACKING)
         } else {
           result = searchFiles(text, liveCtx)
@@ -343,6 +346,34 @@ export default function AIChat({ open, onClose }) {
         })
       }
 
+      // References under the answer: "Ref n" = a file whose text was sent (numbered by the server, the model cites
+      // "[Ref n]"), plus "ระบบเบิกงวดงาน" when tracking data was used. Only ids of the local index are shown as files.
+      let refs = []
+      if (usedAI === 'claude' && Array.isArray(result.refs)) {
+        const byId = new Map(liveCtx.files.map((f) => [String(f.id), f]))
+        const seenRef = new Set()
+        for (const r of result.refs) {
+          const n = r && Number.isInteger(r.ref) && r.ref >= 1 && r.ref <= 99 ? r.ref : null
+          if (!n || seenRef.has(n)) continue
+          seenRef.add(n)
+          const full = r.fileId != null ? byId.get(String(r.fileId)) : null
+          if (full) {
+            const { contentText, _snippet, ...rest } = full
+            refs.push({ ...rest, refNo: n })
+          } else {
+            refs.push({ refNo: n, name: String(r.fileName || 'ไฟล์ที่ไม่พบในรายการ'), missing: true })
+          }
+        }
+        refs.sort((a, b) => a.refNo - b.refNo)
+        const cited = new Set([...String(result.reply ?? '').matchAll(/\[Ref (\d{1,3})\]/g)].map((x) => Number(x[1])))
+        if (cited.size) refs = refs.filter((f) => cited.has(f.refNo))
+      }
+      const usedTracking = usedAI === 'claude'
+        ? result.trackingRef === true
+        : localTrackingAnswer && !!built?.grounding?.projectBriefs?.length && !built?.trackingFailed
+      // grounded answer with references: the reference files ARE the file list (Ref order), so preview / zip cover them
+      if (refs.some((f) => !f.missing) && result.intent !== 'list' && result.intent !== 'download_zip') files = refs.filter((f) => !f.missing)
+
       // Ensure minimum thinking time for natural feel
       await new Promise((r) => setTimeout(r, 400))
 
@@ -356,6 +387,9 @@ export default function AIChat({ open, onClose }) {
         projectCode: result.projectCode,
         fileId: result.fileId,
         files,
+        refs,
+        refsMissing: refs.filter((f) => f.missing),
+        trackingRef: usedTracking,
         usedAI,
         // which project(s) this answer was about (follow-up questions inherit them), and whether we inherited them
         // (portfolio answers are about no single project, so nothing is inherited from them)
@@ -430,18 +464,33 @@ export default function AIChat({ open, onClose }) {
   }
 
   // Render markdown-lite (bold + line breaks)
-  const renderText = (text) => {
+  const renderText = (text, refs) => {
     if (!text) return null
     const parts = text.split(/(\*\*[^*]+\*\*)/g)
+    const byRef = new Map((refs || []).map((f) => [f.refNo, f]))
+    const withRefs = (str, key) =>
+      str.split(/(\[Ref \d{1,3}\])/g).map((seg, j) => {
+        const m = /^\[Ref (\d{1,3})\]$/.exec(seg)
+        if (!m) return seg
+        const f = byRef.get(Number(m[1]))
+        if (!f) return seg
+        return f.missing ? (
+          <span key={`${key}-${j}`} className="ref-chip" title={f.name}>Ref {f.refNo}</span>
+        ) : (
+          <button key={`${key}-${j}`} type="button" className="ref-chip" title={`เปิด ${f.name}`} onClick={() => setPreviewFile(f)}>
+            Ref {f.refNo}
+          </button>
+        )
+      })
     return parts.map((part, i) => {
       if (part.startsWith('**') && part.endsWith('**')) {
         return (
           <strong key={i} style={{ color: 'var(--navy)' }}>
-            {part.slice(2, -2)}
+            {withRefs(part.slice(2, -2), i)}
           </strong>
         )
       }
-      return <span key={i}>{part}</span>
+      return <span key={i}>{withRefs(part, i)}</span>
     })
   }
 
@@ -469,12 +518,24 @@ export default function AIChat({ open, onClose }) {
         {msgs.map((m, i) => (
           <div className={`msg ${m.role}`} key={i}>
             <div className="bubble">
-              <div style={{ whiteSpace: 'pre-line' }}>{renderText(m.welcome ? welcomeText(exampleProject) : m.intent === 'summary' ? stripPassageMarkers(m.text) : m.text)}</div>
-              {m.intent === 'summary' && m.files && m.files.length > 0 && (
-                <div style={{ marginTop: 10, fontSize: 10, color: 'var(--gray-500)' }}>แหล่งข้อมูล</div>
+              <div style={{ whiteSpace: 'pre-line' }}>{renderText(m.welcome ? welcomeText(exampleProject) : m.intent === 'summary' ? stripPassageMarkers(m.text) : m.text, m.refs)}</div>
+              {(m.trackingRef || (m.refs && m.refs.length > 0) || (m.intent === 'summary' && m.files && m.files.length > 0)) && (
+                <div className="chat-refs-h" data-testid="chat-refs">
+                  <div>{m.refs && m.refs.length > 0 ? 'อ้างอิง (Ref)' : m.trackingRef ? 'อ้างอิง' : 'แหล่งข้อมูล'}</div>
+                  {m.trackingRef && (
+                    <div className="chat-ref-sys" data-testid="chat-ref-tracking">
+                      <span className="ref-chip ref-chip-sys">ระบบ</span> ข้อมูลในหน้าเบิกงวดงาน (ความคืบหน้า / งวดเบิก / เอกสารประกอบการเบิก)
+                    </div>
+                  )}
+                  {(m.refsMissing || []).map((f) => (
+                    <div key={`miss-${f.refNo}`} className="chat-ref-sys">
+                      <span className="ref-chip">Ref {f.refNo}</span> {f.name} (ไม่พบในรายการไฟล์ที่คุณเข้าถึงได้ตอนนี้)
+                    </div>
+                  ))}
+                </div>
               )}
-              {(m.intent === 'list' || m.intent === 'summary') && m.files && m.files.length > 0 && (
-                <div style={{ marginTop: m.intent === 'summary' ? 4 : 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {(m.intent === 'list' || m.intent === 'summary' || (m.refs && m.refs.length > 0)) && m.files && m.files.length > 0 && (
+                <div style={{ marginTop: m.intent === 'list' ? 8 : 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {m.files.length >= 2 && (() => {
                     const chosen = m.files.filter((f) => !skipped[i]?.has(String(f.id)))
                     const plan = planZip(chosen)
@@ -512,6 +573,7 @@ export default function AIChat({ open, onClose }) {
                             className="nm"
                             style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                           >
+                            {f.refNo ? <span className="ref-chip" data-testid="chat-ref-no">Ref {f.refNo}</span> : null}
                             {f.name}
                           </div>
                           <div style={{ fontSize: 10, color: 'var(--gray-500)' }}>
@@ -558,7 +620,7 @@ export default function AIChat({ open, onClose }) {
                   ))}
                 </div>
               )}
-              {(m.intent === 'list' || m.intent === 'summary') && m.files && m.files.length >= 2 && (
+              {(m.intent === 'list' || m.intent === 'summary' || (m.refs && m.refs.length > 0)) && m.files && m.files.length >= 2 && (
                 <button
                   type="button"
                   className="btn btn-sm btn-primary"

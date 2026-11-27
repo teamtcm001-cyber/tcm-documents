@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import TrackingOverview from './TrackingOverview.jsx'
 import TrackingDetail from './TrackingDetail.jsx'
 
-// "ติดตามงาน" tab: cross-project overview, or one project's detail when
+// "เบิกงวดงาน" tab: cross-project overview, or one project's detail when
 // `projectId` is set. App owns the selection so the project drawer can deep-link here.
 export default function Tracking({ projectId, onSelectProject, onOpenUpload, onProjectChanged }) {
   useEffect(() => {

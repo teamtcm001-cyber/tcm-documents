@@ -108,7 +108,7 @@ export default function Topbar({ active, onNav, onOpenUpload, onOpenChat, onChan
             <Icon name="folder" size={15} /> โครงการ
           </button>
           <button className={active === 'tracking' ? 'active' : ''} onClick={() => onNav('tracking')}>
-            <Icon name="trend-up" size={15} /> ติดตามงาน
+            <Icon name="trend-up" size={15} /> เบิกงวดงาน
           </button>
           <button className={active === 'ai' ? 'active' : ''} onClick={onOpenChat}>
             <Icon name="sparkles" size={15} /> ถามหาเอกสาร

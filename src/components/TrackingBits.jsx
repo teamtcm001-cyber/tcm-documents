@@ -3,7 +3,7 @@ import Icon from './Icon.jsx'
 import { TRACKING_NOT_INSTALLED_MESSAGE } from '../api/supabase.js'
 import {
   HEALTH_LABEL, STALE_DAYS, BEHIND_POINTS, READY_TO_BILL_DAYS, DUE_SOON_DAYS, coContacts, telHref,
-  CLOSED_PROJECT_STATUS, DEFAULT_PROJECT_STATUS,
+  CLOSED_PROJECT_STATUS, DEFAULT_PROJECT_STATUS, statusLabel,
 } from '../utils/tracking.js'
 
 // Small presentational pieces shared by the tracking screens.
@@ -86,9 +86,9 @@ export function ProjectStatusBadge({ status, hideNormal = false }) {
     <span
       className={`trk-badge trk-status-badge ${closed ? 'trk-tone-mute' : 'trk-tone-info'}`}
       data-testid="project-status"
-      title={closed ? 'โครงการปิดแล้ว — ไม่นับเงื่อนไข % ความคืบหน้า/การอัปเดต (ยังตรวจงวดเบิก)' : `สถานะโครงการ: ${s}`}
+      title={closed ? 'จบงานช่วง PRECONSTRUCTION แล้ว — ไม่นับเงื่อนไข % ความคืบหน้า/การอัปเดต (ยังตรวจงวดเบิก)' : `สถานะโครงการ: ${s}`}
     >
-      {closed && <Icon name="check" size={11} />} {s}
+      {closed && <Icon name="check" size={11} />} {statusLabel(s)}
     </span>
   )
 }
@@ -128,9 +128,9 @@ export function NotInstalledNotice({ onRetry }) {
     <div className="trk-notice" role="alert">
       <Icon name="info" size={22} />
       <div>
-        <div className="trk-notice-title">ยังไม่ได้ติดตั้งโครงสร้างข้อมูลติดตามงาน</div>
+        <div className="trk-notice-title">ยังไม่ได้ติดตั้งโครงสร้างข้อมูลเบิกงวดงาน</div>
         <div className="trk-notice-text">
-          {TRACKING_NOT_INSTALLED_MESSAGE.replace('ยังไม่ได้ติดตั้งโครงสร้างข้อมูลติดตามงาน — ', '')}
+          {TRACKING_NOT_INSTALLED_MESSAGE.replace('ยังไม่ได้ติดตั้งโครงสร้างข้อมูลเบิกงวดงาน — ', '')}
         </div>
         <div className="muted small" style={{ marginTop: 6 }}>
           ส่วนอื่นของระบบ (เอกสาร / ถามหาเอกสาร) ใช้งานได้ตามปกติ
@@ -231,7 +231,7 @@ export function CriteriaPopover() {
             </ul>
           </div>
           <div className="muted small">
-            โครงการสถานะ "ปิดโครงการ" ไม่นับเงื่อนไขความคืบหน้า/การอัปเดต % แต่ยังตรวจงวดเบิกตามปกติ ·
+            โครงการสถานะ "จบงานช่วง PRECONSTRUCTION" ไม่นับเงื่อนไขความคืบหน้า/การอัปเดต % แต่ยังตรวจงวดเบิกตามปกติ ·
             โครงการที่ตั้งค่า "ไม่มีงวดเบิก" ไม่ตรวจเงื่อนไขงวดเบิกเลย (ยังตรวจความคืบหน้า/การอัปเดต %) ·
             โครงการที่ยังไม่ระบุวันที่สัญญาจะเทียบความคืบหน้ากับเวลาไม่ได้
           </div>

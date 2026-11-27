@@ -72,7 +72,7 @@ function MainApp() {
     }
   }, [accessVersion])
 
-  // Clicking the "ติดตามงาน" tab always returns to the cross-project overview.
+  // Clicking the "เบิกงวดงาน" tab always returns to the cross-project overview.
   const handleNav = (id) => {
     if (id === 'tracking') setTrackingProjectId(null)
     if (id === 'admin' && !isAdmin) return

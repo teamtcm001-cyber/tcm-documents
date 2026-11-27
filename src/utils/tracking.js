@@ -183,6 +183,10 @@ export const BEHIND_POINTS = 15
 export const READY_TO_BILL_DAYS = 7
 export const DUE_SOON_DAYS = 7
 export const CLOSED_PROJECT_STATUS = 'ปิดโครงการ'
+// What people SEE for that stored value (the DB value stays 'ปิดโครงการ': nothing to migrate,
+// every filter / rule keeps working). Use statusLabel() wherever a project status is shown.
+export const CLOSED_PROJECT_LABEL = 'จบงานช่วง PRECONSTRUCTION'
+export const statusLabel = (s) => (s === CLOSED_PROJECT_STATUS ? CLOSED_PROJECT_LABEL : s)
 
 // ---------- project status (projects.status is free text in the DB) ----------
 // The values the app lets a user choose, in display order. Single source of truth:
@@ -194,14 +198,14 @@ export const PROJECT_STATUSES = ['กำลังดำเนินการ', C
 export const DEFAULT_PROJECT_STATUS = PROJECT_STATUSES[0]
 
 export const CLOSE_PROJECT_CONFIRM =
-  'โครงการที่ปิดแล้วจะไม่ถูกนับเงื่อนไขความคืบหน้า/การอัปเดต % ในสถานะแดง/เหลือง (ยังตรวจงวดเบิกตามปกติ)\n\nยืนยันปิดโครงการ?'
+  'โครงการที่จบงานช่วง PRECONSTRUCTION แล้วจะไม่ถูกนับเงื่อนไขความคืบหน้า/การอัปเดต % ในสถานะแดง/เหลือง (ยังตรวจงวดเบิกตามปกติ)\n\nยืนยันเปลี่ยนสถานะเป็น "จบงานช่วง PRECONSTRUCTION"?'
 
 // Options for a status <select>. An existing value that is not in PROJECT_STATUSES
 // (legacy / typo / empty) is kept as an extra "(ปัจจุบัน)" option so merely opening and
 // saving a form can never overwrite it silently.
 export function statusOptions(current) {
   const cur = current == null ? '' : String(current)
-  const opts = PROJECT_STATUSES.map((s) => ({ value: s, label: s }))
+  const opts = PROJECT_STATUSES.map((s) => ({ value: s, label: statusLabel(s) }))
   if (!PROJECT_STATUSES.includes(cur)) {
     opts.unshift({ value: cur, label: `${cur || 'ไม่ระบุ'} (ปัจจุบัน)` })
   }

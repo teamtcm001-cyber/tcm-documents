@@ -4,7 +4,7 @@ import { useToast } from './Toast.jsx'
 import { fetchProjects, uploadFile, logActivity } from '../api/supabase.js'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { fmtSize, detectType, detectVersion, TYPE_LABEL, TYPE_COLOR, TYPE_KEYS } from '../utils/format.js'
-import { extractText } from '../utils/textExtract.js'
+import { extractTextDetailed, RESULT } from '../utils/textExtract.js'
 
 // errors that make every further file in this batch fail too (no access, session over, server unreachable, throttled)
 const STOP_CODES = new Set([
@@ -83,17 +83,31 @@ export default function UploadModal({ onClose, onUploaded }) {
           throw e
         }
         // Extract text content for searching (PDF/DOCX/XLSX/TXT)
+        // Scanned PDFs / photos: OCR (in the browser, free) - can take a few seconds per page; the bar moves 30 -> 70.
         let contentText = null
+        let note = ''
         try {
           setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 30 } : x)))
-          contentText = await extractText(it.file, it.name)
-          if (contentText) {
-            console.log(`Extracted ${contentText.length} chars from ${it.name}`)
+          const onOcrProgress = ({ page, pages }) =>
+            setItems((prev) =>
+              prev.map((x) =>
+                x.id === it.id
+                  ? { ...x, progress: 30 + Math.round(((page - 1) * 40) / Math.max(1, pages)), note: `กำลังอ่านข้อความจากภาพ (OCR) หน้า ${page}/${pages}` }
+                  : x,
+              ),
+            )
+          const r = await extractTextDetailed(it.file, it.name, { ocr: true, onOcrProgress })
+          if (r.status === RESULT.SUCCESS) {
+            contentText = r.text
+            if (r.ocr) note = 'อ่านข้อความด้วย OCR แล้ว'
+          } else if (r.ocr) {
+            if (r.storeText) contentText = r.storeText // "OCR found nothing": a re-index will not OCR it again
+            note = r.status === RESULT.EMPTY ? 'ไม่พบข้อความในภาพ — ค้นหาได้จากชื่อไฟล์' : `${r.error || 'OCR ไม่สำเร็จ'} — ค้นหาได้จากชื่อไฟล์ (Re-index ภายหลังได้)`
           }
         } catch (e) {
           console.warn('Text extraction failed:', e)
         }
-        setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 70 } : x)))
+        setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, progress: 70, note } : x)))
 
         let lastPct = -1
         const onProgress = (pct) => {
@@ -193,6 +207,7 @@ export default function UploadModal({ onClose, onUploaded }) {
             </div>
             <div className="t">ลากไฟล์มาวางที่นี่ หรือคลิกเลือก</div>
             <div className="s">รองรับ PDF, Word, Excel, JPG, PNG, ZIP</div>
+            <div className="s" style={{ marginTop: 2 }}>PDF สแกนและรูปภาพ ระบบอ่านข้อความให้อัตโนมัติ (OCR) เพื่อค้นหาและให้ AI อ่านได้ — ใช้เวลาหน้าละไม่กี่วินาที</div>
             <div className="s" style={{ marginTop: 2 }}>ไฟล์ ZIP เก็บไว้เป็นไฟล์และค้นหาจากชื่อได้ (ระบบยังไม่อ่านเนื้อหาข้างใน)</div>
           </label>
 
@@ -222,6 +237,11 @@ export default function UploadModal({ onClose, onUploaded }) {
                     <div style={{ fontSize: 11, color: 'var(--gray-500)' }}>
                       {TYPE_LABEL[it.type] || it.type} {it.version ? `· ${it.version}` : ''} · {fmtSize(it.size)}
                     </div>
+                    {it.note && (
+                      <div style={{ fontSize: 11, color: 'var(--gray-500)' }} data-testid="upload-note" aria-live="polite">
+                        {it.note}
+                      </div>
+                    )}
                   </div>
                   <div className="bar" style={{ width: 80 }}>
                     <div className="fill" style={{ width: `${it.progress}%` }} />

@@ -8,7 +8,7 @@ import { useAuth } from '../auth/AuthContext.jsx'
 import { ReadOnlyBadge, ManagerBadge } from './AccessBits.jsx'
 import {
   computeHealth, fmtThaiDate, isIsoDate, isSaneDate, INSANE_DATE_MESSAGE, phoneError, normalizePhones,
-  statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM, hasInstallments,
+  statusOptions, statusLabel, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM, hasInstallments,
 } from '../utils/tracking.js'
 import { HealthChip, ProjectStatusBadge, NotInstalledNotice, ErrorNotice, CoContact } from './TrackingBits.jsx'
 import TrackingProgress from './TrackingProgress.jsx'
@@ -87,7 +87,7 @@ function ProjectHeader({ row, health, canEdit, onSaved }) {
       setSaving(true)
       try {
         await updateProjectStatus(row.project_id, projStatus, { previousStatus: base.status })
-        toast(`เปลี่ยนสถานะโครงการเป็น "${projStatus}" เรียบร้อย`)
+        toast(`เปลี่ยนสถานะโครงการเป็น "${statusLabel(projStatus)}" เรียบร้อย`)
         setEditing(false)
         await onSaved()
       } catch (err) {
@@ -166,7 +166,7 @@ function ProjectHeader({ row, health, canEdit, onSaved }) {
                 ))}
               </select>
               {projStatus === CLOSED_PROJECT_STATUS && base?.status !== CLOSED_PROJECT_STATUS ? (
-                <span className="muted small">ปิดโครงการ: ไม่นับเงื่อนไข % ความคืบหน้า/การอัปเดต % (ยังตรวจงวดเบิกตามปกติ)</span>
+                <span className="muted small">จบงานช่วง PRECONSTRUCTION: ไม่นับเงื่อนไข % ความคืบหน้า/การอัปเดต % (ยังตรวจงวดเบิกตามปกติ)</span>
               ) : null}
             </div>
             <div className="field" style={{ flex: '1 1 180px' }}>
@@ -313,7 +313,7 @@ export default function TrackingDetail({ projectId, onBack, onOpenUpload, onProj
 
   const back = (
     <button type="button" className="btn btn-ghost btn-sm" onClick={onBack} style={{ marginBottom: 16 }}>
-      <Icon name="arrow-l" size={14} /> กลับไปภาพรวมติดตามงาน
+      <Icon name="arrow-l" size={14} /> กลับไปภาพรวมเบิกงวดงาน
     </button>
   )
 

@@ -138,8 +138,14 @@ export const normalizeFile = (row) => ({
   uploader: row.uploader_name || '',
   isLatest: !!row.is_latest,
   storagePath: row.storage_path,
-  contentText: row.content_text || '',
+  // "OCR ran and found no text" (src/utils/ocr.js OCR_NO_TEXT) is stored only so re-index skips the file:
+  // for search / chat / preview it is NO text
+  contentText: isOcrNoText(row.content_text) ? '' : row.content_text || '',
+  ocrNoText: isOcrNoText(row.content_text),
 })
+
+// Same marker as OCR_NO_TEXT in src/utils/ocr.js (kept here so this module does not import the OCR code).
+export const isOcrNoText = (t) => typeof t === 'string' && /^\[\[OCR\]\]\s*\(ไม่พบข้อความในภาพ\)\s*$/.test(t)
 
 // Compute isLatest grouping (in-memory)
 export const computeIsLatest = (files) => {

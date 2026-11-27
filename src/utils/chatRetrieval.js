@@ -19,7 +19,7 @@
 //   * bounded size (<= 6 briefs for named projects, <= 12 for portfolio questions, <= 14 passages, <= ~40k passage chars, each <= 4000),
 //   * the context files are never mutated.
 
-import { computeHealth, HEALTH_ORDER, STATUS_LABEL, OPEN_STATUSES, splitCoNames, fmtThaiDate, hasInstallments } from './tracking.js'
+import { computeHealth, HEALTH_ORDER, STATUS_LABEL, OPEN_STATUSES, splitCoNames, fmtThaiDate, hasInstallments, statusLabel } from './tracking.js'
 
 export const GROUNDING_LIMITS = {
   BRIEFS: 6, // named projects ("summarize project X")
@@ -942,6 +942,9 @@ export function extractPassages(file, query, opts = {}) {
   const perFile = Math.max(1, Math.min(opts.perFile || 2, 3))
   const raw = cleanText(file?.contentText)
   if (!raw.trim()) return []
+  // text read by OCR (src/utils/ocr.js OCR_MARK): every passage of the file says so; "OCR found nothing" = no passage
+  const isOcr = raw.startsWith('[[OCR]]')
+  if (isOcr && !raw.replace(/^\[\[OCR\]\][^\n]*/, '').replace(/\(ไม่พบข้อความในภาพ\)/, '').trim()) return []
   const terms = opts.terms || queryTerms(query)
   const positional = opts.positional ?? (file?.type === 'mom' || SUMMARY_RE.test(norm(query)))
   const chunks = chunkText(raw, Math.min(opts.chunkSize || 1500, maxChars))
@@ -966,6 +969,7 @@ export function extractPassages(file, query, opts = {}) {
     type: file.type || 'other',
     date: file.date || '',
     ...(mt ? { series: mt.series, meetingNo: mt.number, meetingYear: mt.yearText, meetingDate: mt.date, meetingDateSource: mt.dateSource } : {}),
+    ...(isOcr ? { ocr: true } : {}),
     text: trimPassage(scrubText(c.text), maxChars, terms),
     score: c.score,
     start: c.start,
@@ -1045,6 +1049,7 @@ export function buildPassages(files, query, opts = {}) {
     ...(c.series
       ? { series: rankOf(c)?.[2] || c.series, meetingNo: c.meetingNo, meetingYear: c.meetingYear, meetingDate: c.meetingDate, meetingDateSource: c.meetingDateSource }
       : {}),
+    ...(c.ocr ? { ocr: true } : {}),
     text: c.text,
   }))
 }
@@ -1220,7 +1225,7 @@ export function buildProjectBrief(project, trackingRow, installments = [], { onl
     projectId: p.id ?? row?.project_id ?? null,
     code: p.code ?? row?.project_code ?? null,
     name: p.name ?? row?.project_name ?? null,
-    status: row?.project_status ?? p.status ?? null,
+    status: statusLabel(row?.project_status ?? p.status ?? null),
     projectCo: names.length ? names.join(', ') : null,
     contract: start || end ? { start, end } : null,
     progress,
@@ -1466,7 +1471,7 @@ export async function buildGrounding(plan, query, ctx, deps = {}) {
 
 // ---------- 7. deterministic answers when the AI is unavailable ----------
 const HEALTH_TH = { red: 'ต้องดำเนินการ', amber: 'ควรติดตาม', green: 'ปกติ' }
-export const TRACKING_FAILED_TEXT = 'โหลดข้อมูลติดตามงานไม่สำเร็จ ลองใหม่อีกครั้ง'
+export const TRACKING_FAILED_TEXT = 'โหลดข้อมูลเบิกงวดงานไม่สำเร็จ ลองใหม่อีกครั้ง'
 export const NO_BILLING_BRIEF_TEXT = 'งวดงาน: โครงการนี้ไม่มีงวดเบิก (ตั้งค่าไว้)'
 export const NO_BILLING_SCAN_TEXT = 'โครงการไม่มีงวดเบิก (ตั้งค่าไว้)'
 export const portfolioCapNote = (shown, total) =>
@@ -1500,7 +1505,7 @@ export function localTrackingAnswer(query, briefs, info = {}) {
   const failed = briefs.filter((b) => b.trackingAvailable === false)
   const cap = portfolioCapNote(info.projectsShown, info.projectsTotal)
   const checkedSome = ok.some((b) => !b.noInstallments) || (info.docsScan?.projectsChecked || 0) > 0
-  if (docsQ && !list.length && checkedSome) lines.push('ไม่พบงวดที่เอกสารเบิกยังขาดในโครงการที่โหลดข้อมูลได้ (ตามข้อมูลติดตามงานในระบบ)')
+  if (docsQ && !list.length && checkedSome) lines.push('ไม่พบงวดที่เอกสารเบิกยังขาดในโครงการที่โหลดข้อมูลได้ (ตามข้อมูลเบิกงวดงานในระบบ)')
   // documents question: projects set to "no billing installments" get their own line (after the answer
   // itself), never "no installment data" / "could not check"
   let noBillingLine = ''

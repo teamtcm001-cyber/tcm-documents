@@ -5,6 +5,7 @@ import { useAuth } from '../auth/AuthContext.jsx'
 import { NoProjectsNotice, ReadOnlyBadge } from './AccessBits.jsx'
 import { useZipDownload } from './ZipDownload.jsx'
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
+import { statusLabel } from '../utils/tracking.js'
 
 function StatCards({ projects, files }) {
   const latestCount = files.filter((f) => f.isLatest).length
@@ -62,7 +63,7 @@ function ProjectCard({ project, fileCount, latestDate, onOpen, onZip, zipBusy })
           <span>
             <Icon name="clock" size={11} /> อัปเดต {latestDate ? fmtDate(latestDate) : '-'}
           </span>
-          {project.status && <span style={{ color: 'var(--steel)' }}>{project.status}</span>}
+          {project.status && <span style={{ color: 'var(--steel)' }}>{statusLabel(project.status)}</span>}
           {project.project_co && (
             <span className="proj-co" title={`Project Co: ${project.project_co}`}>
               <Icon name="user" size={11} /> Co: {project.project_co}

@@ -4,9 +4,9 @@ import { useToast } from './Toast.jsx'
 import {
   fetchFiles, deleteFile, downloadFile, deleteProject, getFileBlob, updateFileContent, updateProjectStatus,
 } from '../api/supabase.js'
-import { statusOptions, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM } from '../utils/tracking.js'
+import { statusOptions, statusLabel, CLOSED_PROJECT_STATUS, CLOSE_PROJECT_CONFIRM } from '../utils/tracking.js'
 import { fmtSize, fmtDate, normalizeFile, computeIsLatest, TYPE_LABEL, TYPE_COLOR, TYPE_BG, TYPE_TEXT } from '../utils/format.js'
-import { extractTextFromBlobDetailed, RESULT } from '../utils/textExtract.js'
+import { extractTextFromBlobDetailed, RESULT, EXTRACTABLE_RE } from '../utils/textExtract.js'
 import PreviewModal from './PreviewModal.jsx'
 import Dialog from './ui/Dialog.jsx'
 import { ReadOnlyBadge, ManagerBadge } from './AccessBits.jsx'
@@ -194,7 +194,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
     setStatusSaving(true)
     try {
       const row = await updateProjectStatus(project.id, next, { previousStatus: prev })
-      toast(`เปลี่ยนสถานะโครงการเป็น "${next}" เรียบร้อย`)
+      toast(`เปลี่ยนสถานะโครงการเป็น "${statusLabel(next)}" เรียบร้อย`)
       onStatusChanged?.(row)
     } catch (err) {
       toast(err.message || 'เปลี่ยนสถานะโครงการไม่สำเร็จ', 'err')
@@ -207,7 +207,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
     if (
       !window.confirm(
         `ลบโครงการ "${project.name}" และไฟล์ทั้งหมด?\n\n` +
-          'ข้อมูลติดตามงานทั้งหมดของโครงการนี้จะถูกลบถาวรด้วย ได้แก่ ประวัติ % ความคืบหน้า, งวดเบิก, ' +
+          'ข้อมูลเบิกงวดงานทั้งหมดของโครงการนี้จะถูกลบถาวรด้วย ได้แก่ ประวัติ % ความคืบหน้า, งวดเบิก, ' +
           'ประวัติสถานะงวด และเช็กลิสต์เอกสาร — กู้คืนไม่ได้'
       )
     )
@@ -223,12 +223,13 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
   }
 
   const handleReindex = async () => {
-    const needIndex = files.filter((f) => !f.contentText && /\.(pdf|docx?|xlsx?|txt|md|csv|json)$/i.test(f.name))
+    // ocrNoText = OCR already ran and found no text (a site photo): do not OCR it again
+    const needIndex = files.filter((f) => !f.contentText && !f.ocrNoText && EXTRACTABLE_RE.test(f.name))
     if (needIndex.length === 0) {
       toast('ทุกไฟล์ index แล้ว ✅')
       return
     }
-    if (!window.confirm(`Re-index เนื้อหา ${needIndex.length} ไฟล์? (อาจใช้เวลาสักครู่)`)) return
+    if (!window.confirm(`Re-index เนื้อหา ${needIndex.length} ไฟล์? (อาจใช้เวลาสักครู่ — PDF สแกนและรูปภาพจะอ่านด้วย OCR หน้าละไม่กี่วินาที อย่าปิดหน้านี้ระหว่างทำ)`)) return
 
     setReindexing(true)
     setReindexReport(null)
@@ -242,7 +243,10 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
       setReindexProgress({ current: i + 1, total: needIndex.length })
       try {
         const blob = await getFileBlob(f.id)
-        const result = await extractTextFromBlobDetailed(blob, f.name)
+        const result = await extractTextFromBlobDetailed(blob, f.name, {
+          ocr: true,
+          onOcrProgress: ({ page, pages }) => setReindexProgress({ current: i + 1, total: needIndex.length, ocrPage: page, ocrPages: pages }),
+        })
 
         if (result.status === RESULT.SUCCESS) {
           const updated = await updateFileContent(f.id, result.text)
@@ -252,6 +256,14 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
             failList.push({ name: f.name, reason: 'บันทึกลง DB ไม่ได้ (ตรวจสอบว่า run migration แล้ว)' })
           }
         } else if (result.status === RESULT.EMPTY) {
+          // OCR found no text: remember that (short marker), so the next re-index skips this file
+          if (result.storeText) {
+            try {
+              await updateFileContent(f.id, result.storeText)
+            } catch (_) {
+              /* only a skip-marker; the file just gets OCR'd again next time */
+            }
+          }
           emptyList.push({ name: f.name, reason: result.error || 'ไม่มีข้อความให้สกัด' })
         } else {
           failList.push({ name: f.name, reason: result.error || 'ไม่ทราบสาเหตุ' })
@@ -351,7 +363,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                   ))}
                 </select>
               ) : (
-                project.status || 'active'
+                statusLabel(project.status) || 'active'
               )}
             </div>
             <button className="close" onClick={onClose}>
@@ -383,7 +395,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                   type="button"
                   className="drawer-co-edit"
                   onClick={() => onOpenTracking(project)}
-                  title="เปิดหน้าติดตามงานเพื่อแก้ไขชื่อ Project Co และเบอร์ติดต่อ"
+                  title="เปิดหน้าเบิกงวดงานเพื่อแก้ไขชื่อ Project Co และเบอร์ติดต่อ"
                 >
                   ตั้งค่า
                 </button>
@@ -421,7 +433,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
                 onClick={() => onOpenTracking(project)}
                 title="ดู % ความคืบหน้า งวดเบิก และความพร้อมของเอกสาร"
               >
-                <Icon name="trend-up" size={13} /> ติดตามงาน
+                <Icon name="trend-up" size={13} /> เบิกงวดงาน
               </button>
             )}
             {canEdit && (
@@ -438,7 +450,7 @@ export default function ProjectDrawer({ project, refreshKey, onClose, onChanged,
               >
                 <Icon name="sparkles" size={13} />
                 {reindexing
-                  ? `กำลัง index... ${reindexProgress.current}/${reindexProgress.total}`
+                  ? `กำลัง index... ${reindexProgress.current}/${reindexProgress.total}${reindexProgress.ocrPages ? ` (OCR หน้า ${reindexProgress.ocrPage}/${reindexProgress.ocrPages})` : ''}`
                   : 'Re-index เนื้อหา'}
               </button>
             )}

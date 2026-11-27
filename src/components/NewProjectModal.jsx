@@ -2,7 +2,7 @@ import { useState } from 'react'
 import Icon from './Icon.jsx'
 import { useToast } from './Toast.jsx'
 import { createProject } from '../api/supabase.js'
-import { phoneError, PROJECT_STATUSES as STATUSES, DEFAULT_PROJECT_STATUS } from '../utils/tracking.js'
+import { phoneError, PROJECT_STATUSES as STATUSES, DEFAULT_PROJECT_STATUS, statusLabel } from '../utils/tracking.js'
 
 const COLORS = ['#2DBE60', '#3A6EA5', '#6E56CF', '#F5A623', '#0EA5E9', '#EC4899', '#DC2626', '#1F3A5F']
 
@@ -35,11 +35,11 @@ export default function NewProjectModal({ onClose, onCreated }) {
       if (noBilling) payload.has_installments = false
       const created = await createProject(payload)
       if (created?._phoneNotSaved && created?._billingFlagNotSaved) {
-        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึกเบอร์ติดต่อและการตั้งค่า "ไม่มีงวดเบิก" — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql และ project-billing-flag.sql แล้วตั้งค่าในหน้าติดตามงาน', 'err')
+        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึกเบอร์ติดต่อและการตั้งค่า "ไม่มีงวดเบิก" — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql และ project-billing-flag.sql แล้วตั้งค่าในหน้าเบิกงวดงาน', 'err')
       } else if (created?._phoneNotSaved) {
-        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึกเบอร์ติดต่อ — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql แล้วเพิ่มเบอร์ในหน้าติดตามงาน', 'err')
+        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึกเบอร์ติดต่อ — ให้ผู้ดูแลรัน scripts/project-tracking-fix-3.sql แล้วเพิ่มเบอร์ในหน้าเบิกงวดงาน', 'err')
       } else if (created?._billingFlagNotSaved) {
-        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึก "ไม่มีงวดเบิก" — ต้องให้ผู้ดูแลระบบรันสคริปต์ project-billing-flag.sql ก่อน แล้วตั้งค่าในหน้าติดตามงาน', 'err')
+        toast('สร้างโครงการเรียบร้อย แต่ยังไม่ได้บันทึก "ไม่มีงวดเบิก" — ต้องให้ผู้ดูแลระบบรันสคริปต์ project-billing-flag.sql ก่อน แล้วตั้งค่าในหน้าเบิกงวดงาน', 'err')
       } else {
         toast('สร้างโครงการเรียบร้อย')
       }
@@ -131,7 +131,7 @@ export default function NewProjectModal({ onClose, onCreated }) {
               <select value={status} onChange={(e) => setStatus(e.target.value)}>
                 {STATUSES.map((s) => (
                   <option key={s} value={s}>
-                    {s}
+                    {statusLabel(s)}
                   </option>
                 ))}
               </select>
@@ -141,7 +141,7 @@ export default function NewProjectModal({ onClose, onCreated }) {
                 <input type="checkbox" checked={noBilling} onChange={(e) => setNoBilling(e.target.checked)} data-testid="np-no-billing" />
                 <span>โครงการนี้ไม่มีงวดเบิก</span>
               </label>
-              <span className="muted small">ติ๊กเฉพาะโครงการที่ไม่มีงวดเบิกเลย (เปลี่ยนภายหลังได้ในหน้าติดตามงาน)</span>
+              <span className="muted small">ติ๊กเฉพาะโครงการที่ไม่มีงวดเบิกเลย (เปลี่ยนภายหลังได้ในหน้าเบิกงวดงาน)</span>
             </div>
             <div className="field">
               <label>สีโครงการ</label>

@@ -205,7 +205,7 @@ export default function TrackingOverview({ onOpenProject }) {
       <div className="container">
         <div className="section-head">
           <div className="section-title">
-            <h2>ติดตามงานโครงการ</h2>
+            <h2>เบิกงวดงาน</h2>
             <div className="sub">
               % ความคืบหน้า · งวดเบิก · ความพร้อมของเอกสาร · ข้อมูล ณ {fmtThaiDate(todayTH())}
             </div>
@@ -268,9 +268,9 @@ export default function TrackingOverview({ onOpenProject }) {
                   className={`filter-chip ${hideClosed ? 'on' : ''}`}
                   aria-pressed={hideClosed}
                   onClick={toggleHideClosed}
-                  title="ซ่อนโครงการสถานะ ปิดโครงการ ออกจากรายการและตัวเลขสรุป (ข้อมูลไม่ถูกลบ) — ยกเว้นโครงการที่ยังมีงวดเลยกำหนดเบิก (สถานะแดง) จะยังแสดงอยู่"
+                  title="ซ่อนโครงการสถานะ จบงานช่วง PRECONSTRUCTION ออกจากรายการและตัวเลขสรุป (ข้อมูลไม่ถูกลบ) — ยกเว้นโครงการที่ยังมีงวดเลยกำหนดเบิก (สถานะแดง) จะยังแสดงอยู่"
                 >
-                  <Icon name="folder" size={12} /> ซ่อนโครงการที่ปิดแล้ว ({hideableCount})
+                  <Icon name="folder" size={12} /> ซ่อนโครงการที่จบงานช่วง PRECONSTRUCTION ({hideableCount})
                 </button>
               )}
               <CriteriaPopover />
