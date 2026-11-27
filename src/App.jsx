@@ -142,8 +142,10 @@ function MainApp() {
       const projects = await fetchProjects()
       const found = projects.find((p) => p.id === projectId)
       if (found) setDrawerProject(found)
+      return !!found
     } catch (err) {
       console.error('open project:', err)
+      return false
     }
   }
 
@@ -232,7 +234,7 @@ function MainApp() {
       {passwordOpen && <ChangePasswordDialog onClose={() => setPasswordOpen(false)} />}
 
       {!chatOpen && <ChatFab onClick={() => setChatOpen(true)} />}
-      <AIChat open={chatOpen} onClose={() => setChatOpen(false)} />
+      <AIChat open={chatOpen} onClose={() => setChatOpen(false)} onOpenProject={openProjectById} />
     </div>
   )
 }

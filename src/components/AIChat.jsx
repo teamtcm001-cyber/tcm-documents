@@ -148,7 +148,78 @@ const welcomeText = (exampleProject) =>
 const listNames = (items) => items.slice(0, 3).map((x) => x.fileName).join(', ') + (items.length > 3 ? ` และอีก ${items.length - 3} ไฟล์` : '')
 const projectLabel = (p) => [p.code, p.name].filter(Boolean).join(' ')
 
-export default function AIChat({ open, onClose }) {
+// The chat hands out at most PICK_MAX files per answer (pickable: preview / download / zip). A file list with
+// more matches is shown as names grouped by project + advice to download from the project page, with a button
+// that opens each project (decided with the user).
+export const PICK_MAX = 8
+const isOverflow = (m) => m.intent === 'list' && Array.isArray(m.files) && m.files.length > 0 && Math.max(m.matchCount || 0, m.files.length) > PICK_MAX
+const OVERFLOW_PROJECT_BUTTONS = 6
+
+function ListOverflow({ m, projects, onOpenProject, onPreview }) {
+  const total = Math.max(m.matchCount || 0, m.files.length)
+  const byProject = new Map()
+  for (const f of m.files) {
+    const k = f.projectId || ''
+    if (!byProject.has(k)) byProject.set(k, [])
+    byProject.get(k).push(f)
+  }
+  const pmap = new Map((projects || []).map((p) => [p.id, p]))
+  const groups = [...byProject.entries()].map(([pid, files]) => ({ pid, project: pmap.get(pid) || null, files }))
+  const label = (p) => (p ? (p.code ? `${p.code}` : p.name) : 'ไม่ทราบโครงการ')
+  return (
+    <div className="chat-overflow" data-testid="chat-overflow">
+      <div className="chat-overflow-tip">
+        พบ <b>{total.toLocaleString()} ไฟล์</b> — เกินกว่าที่ AI หยิบให้ได้ครั้งละ {PICK_MAX} ไฟล์
+        <br />
+        แนะนำให้เข้าไปดาวน์โหลดที่หน้าโครงการโดยตรง (ติ๊กเลือกหลายไฟล์แล้วกด "ดาวน์โหลด Zip" ได้)
+      </div>
+      {onOpenProject && (
+        <div className="chat-overflow-btns">
+          {groups
+            .filter((g) => g.project)
+            .slice(0, OVERFLOW_PROJECT_BUTTONS)
+            .map((g) => (
+              <button
+                key={g.pid}
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => onOpenProject(g.pid)}
+                title={g.project.name}
+                data-testid="chat-open-project"
+              >
+                <Icon name="folder" size={13} /> เปิดโครงการ {label(g.project)}{total === m.files.length ? ` (${g.files.length})` : ''}
+              </button>
+            ))}
+        </div>
+      )}
+      <div className="chat-overflow-list">
+        {groups.map((g) => (
+          <div key={g.pid || 'none'} className="chat-overflow-group">
+            <div className="chat-overflow-proj">
+              {label(g.project)}
+              {g.project?.name && g.project.code ? <span className="muted"> — {g.project.name}</span> : null}
+            </div>
+            <ol>
+              {g.files.map((f) => (
+                <li key={f.id}>
+                  <button type="button" className="chat-overflow-file" onClick={() => onPreview(f)} title="ดูตัวอย่าง">
+                    {f.name}
+                  </button>
+                  <span className="muted"> · {TYPE_LABEL[f.type] || f.type} · {fmtDate(f.date)}{f.isLatest ? ' · ล่าสุด' : ''}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+        {total > m.files.length && (
+          <div className="muted small">แสดงรายชื่อ {m.files.length} จาก {total.toLocaleString()} ไฟล์ — ดูทั้งหมดได้ที่หน้าโครงการ</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function AIChat({ open, onClose, onOpenProject }) {
   const [msgs, setMsgs] = useState([{ role: 'bot', welcome: true, text: '' }])
   const [input, setInput] = useState('')
   const [thinking, setThinking] = useState(false)
@@ -340,9 +411,10 @@ export default function AIChat({ open, onClose }) {
         const byId = new Map(liveCtx.files.map((f) => [String(f.id), f]))
         files = files.map((f) => {
           const full = byId.get(String(f.id))
-          if (!full) return f
+          const { contentText: _drop, ...slim } = f
+          if (!full) return slim
           const { contentText, ...rest } = full
-          return { ...rest, ...f, storagePath: f.storagePath || rest.storagePath, ext: f.ext || rest.ext }
+          return { ...rest, ...slim, storagePath: slim.storagePath || rest.storagePath, ext: slim.ext || rest.ext }
         })
       }
 
@@ -387,6 +459,7 @@ export default function AIChat({ open, onClose }) {
         projectCode: result.projectCode,
         fileId: result.fileId,
         files,
+        matchCount: Number.isInteger(result.matchCount) ? result.matchCount : null,
         refs,
         refsMissing: refs.filter((f) => f.missing),
         trackingRef: usedTracking,
@@ -534,7 +607,23 @@ export default function AIChat({ open, onClose }) {
                   ))}
                 </div>
               )}
-              {(m.intent === 'list' || m.intent === 'summary' || (m.refs && m.refs.length > 0)) && m.files && m.files.length > 0 && (
+              {isOverflow(m) && (
+                <ListOverflow
+                  m={m}
+                  projects={ctx.projects}
+                  onPreview={setPreviewFile}
+                  onOpenProject={
+                    onOpenProject
+                      ? async (pid) => {
+                          const ok = await onOpenProject(pid)
+                          if (ok) onClose?.()
+                          else toast('เปิดโครงการไม่สำเร็จ — อาจไม่มีสิทธิ์เข้าถึงโครงการนี้แล้ว หรือการเชื่อมต่อขัดข้อง', 'err')
+                        }
+                      : null
+                  }
+                />
+              )}
+              {(m.intent === 'list' || m.intent === 'summary' || (m.refs && m.refs.length > 0)) && m.files && m.files.length > 0 && !isOverflow(m) && (
                 <div style={{ marginTop: m.intent === 'list' ? 8 : 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {m.files.length >= 2 && (() => {
                     const chosen = m.files.filter((f) => !skipped[i]?.has(String(f.id)))
@@ -620,7 +709,7 @@ export default function AIChat({ open, onClose }) {
                   ))}
                 </div>
               )}
-              {(m.intent === 'list' || m.intent === 'summary' || (m.refs && m.refs.length > 0)) && m.files && m.files.length >= 2 && (
+              {(m.intent === 'list' || m.intent === 'summary' || (m.refs && m.refs.length > 0)) && m.files && m.files.length >= 2 && !isOverflow(m) && (
                 <button
                   type="button"
                   className="btn btn-sm btn-primary"

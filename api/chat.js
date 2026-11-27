@@ -56,6 +56,7 @@ const LIMITS = {
   HISTORY_TOTAL_CHARS: 8000,
 }
 const MAX_FILES_IN_PROMPT = 300
+const LIST_MAX = 50 // files a "list" answer may name
 const ANTHROPIC_TIMEOUT_MS = 45000
 const INTENTS = ['list', 'download_zip', 'answer', 'summary']
 const HEALTHS = ['red', 'amber', 'green']
@@ -779,7 +780,8 @@ ${projLines || '- ยังไม่มีโครงการ'}
 {
   "intent": "list" | "download_zip" | "answer",
   "reply": "ข้อความตอบกลับสั้นๆ ภาษาไทย (1-3 ประโยค)",
-  "fileIds": ["id1", "id2", ...] (array of file IDs to show, max 8 items, only if intent=list, อ้างอิงจาก fileId ของไฟล์ที่ตรงกับคำถาม),
+  "fileIds": ["id1", "id2", ...] (only if intent=list: ใส่ fileId ของ "ทุกไฟล์" ที่ตรงคำถาม สูงสุด 50 รายการ — ระบบจะจัดการแสดงผลเอง ห้ามตัดเหลือ 8),
+  "matchCount": จำนวนไฟล์ทั้งหมดที่ตรงคำถาม (ตัวเลข, only if intent=list; อาจมากกว่า 50 ได้),
   "projectCode": "รหัสโครงการ เช่น MRT-PP" (only if intent=download_zip)
 }
 
@@ -788,6 +790,7 @@ ${projLines || '- ยังไม่มีโครงการ'}
 - ถ้าผู้ใช้ขอ "ทั้งหมด" รวม version เก่าด้วย; ถ้าขอ "ล่าสุด" หรือไม่ระบุ → เลือกเฉพาะ isLatest
 - ถ้า fileIds มีหลายรายการ ให้เรียงตามวันที่ใหม่สุดก่อน
 - ถ้าไม่พบไฟล์ ให้ใช้ intent=answer และตอบว่า "ไม่พบไฟล์ที่ตรงเงื่อนไข ลองเปลี่ยนคำค้น"
+- ถ้าไฟล์ที่ตรงมีมากกว่า 8 ไฟล์ ใน reply ให้บอกจำนวนที่พบ และแนะนำสั้นๆ ให้เข้าไปดาวน์โหลดที่หน้าโครงการโดยตรง (ระบบจะแสดงรายการและปุ่มเปิดโครงการให้เอง)
 
 ============================================================
 โหมดพิเศษ: ตรวจสอบความครบถ้วนของเอกสารขออนุญาตก่อสร้าง
@@ -885,7 +888,8 @@ ${inventoryBlock}
         },
         body: JSON.stringify({
           model: 'claude-haiku-4-5',
-          max_tokens: grounding ? 2000 : 1024, // grounded answers carry a source label on every bullet + the meeting basis line
+          // grounded answers carry a source label on every bullet + the meeting basis line; a list answer may name up to 50 file ids
+          max_tokens: grounding ? 2000 : 2500,
           system: systemPrompt,
           messages: [...historyMessages, { role: 'user', content: userPrompt }],
         }),
@@ -924,8 +928,8 @@ ${inventoryBlock}
     const hitMax = data?.stop_reason === 'max_tokens'
 
     // Only these fields ever leave the server (besides the fallback signal):
-    // { intent, reply, files, projectCode, truncated?, refs?, trackingRef? }
-    const respond = ({ intent, reply, files: outFiles = [], projectCode = null }) => {
+    // { intent, reply, files, projectCode, truncated?, refs?, trackingRef?, matchCount? }
+    const respond = ({ intent, reply, files: outFiles = [], projectCode = null, matchCount = null }) => {
       let text = typeof reply === 'string' ? reply : reply == null ? '' : String(reply)
       text = text.slice(0, LIMITS.REPLY_CHARS)
       if (grounding) text = stripMarkers(text) // [P1] labels are internal
@@ -937,6 +941,7 @@ ${inventoryBlock}
       text = fixRefs(text, grounding && intent !== 'list' && intent !== 'download_zip' ? refs.length : 0)
       text = text.trim() || 'ขออภัย ระบบไม่สามารถวิเคราะห์คำตอบได้'
       const out = { intent, reply: text, files: outFiles, projectCode }
+      if (matchCount !== null) out.matchCount = matchCount
       // what the answer could cite: Ref n -> file (all files whose text was sent), and whether tracking data was sent
       if (refs.length && intent !== 'list' && intent !== 'download_zip') out.refs = refs
       if (grounding && !grounding.empty && grounding.briefs.length && intent !== 'list' && intent !== 'download_zip') out.trackingRef = true
@@ -971,7 +976,8 @@ ${inventoryBlock}
     if (intent === 'summary' && (!grounding || grounding.empty)) intent = 'answer' // nothing to summarise from
     if (hitMax && grounding && !grounding.empty && intent !== 'download_zip') intent = 'summary'
 
-    // Map fileIds back to full file objects (unknown ids are dropped, max 8)
+    // Map fileIds back to full file objects (unknown ids are dropped). A list may name up to LIST_MAX files (the chat
+    // shows <= 8 as pickable files and longer lists as "go to the project page" + the names); a summary cites <= 8.
     let outFiles = []
     if ((intent === 'list' || intent === 'summary') && Array.isArray(parsed.fileIds)) {
       const fileMap = new Map(files.map((f) => [String(f.id), f]))
@@ -979,11 +985,18 @@ ${inventoryBlock}
       outFiles = parsed.fileIds
         .map((id) => (typeof id === 'string' || typeof id === 'number' ? fileMap.get(String(id)) : undefined))
         .filter((f) => f && !seen.has(String(f.id)) && seen.add(String(f.id)))
-        .slice(0, 8)
+        .slice(0, intent === 'list' ? LIST_MAX : 8)
+    }
+    // how many files match in total (the model's count; never below what it actually listed)
+    let matchCount = null
+    if (intent === 'list') {
+      const n = Number(parsed.matchCount)
+      // never more than the files the person can see (the context the client sent)
+      matchCount = Number.isInteger(n) && n >= 0 ? Math.min(Math.max(n, outFiles.length), files.length) : outFiles.length
     }
     const projectCode = intent === 'download_zip' && typeof parsed.projectCode === 'string' ? cline(parsed.projectCode, 50) || null : null
 
-    return respond({ intent, reply: parsed.reply, files: outFiles, projectCode })
+    return respond({ intent, reply: parsed.reply, files: outFiles, projectCode, matchCount })
   } catch (err) {
     console.error('Chat handler error:', err?.name === 'AbortError' ? 'upstream timeout' : err?.name || 'Error')
     return res.status(200).json({

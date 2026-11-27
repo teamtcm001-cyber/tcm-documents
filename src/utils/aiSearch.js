@@ -576,9 +576,9 @@ export function searchFiles(text, ctx) {
     resultFiles = candidates.sort((a, b) => new Date(b.date) - new Date(a.date))
   }
 
-  const limit = 8
+  // up to 50 names; the chat shows <= 8 as pickable files, more as a list + "open the project" (AIChat PICK_MAX)
+  const limit = 50
   const shown = resultFiles.slice(0, limit)
-  const moreText = resultFiles.length > limit ? ` (แสดง ${limit} จาก ${resultFiles.length} ไฟล์)` : ''
   const scopeText = scope.length ? ` — ${scope.join(' · ')}` : ''
 
   let reply
@@ -586,12 +586,13 @@ export function searchFiles(text, ctx) {
     const f = resultFiles[0]
     reply = `เจอ 1 ไฟล์${scopeText}:\n📄 ${f.name}`
   } else {
-    reply = `เจอ **${resultFiles.length} ไฟล์**${scopeText}${moreText}`
+    reply = `เจอ **${resultFiles.length} ไฟล์**${scopeText}`
   }
 
   return {
     intent: 'list',
     reply,
     files: shown,
+    matchCount: resultFiles.length,
   }
 }
