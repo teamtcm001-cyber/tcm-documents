@@ -5,9 +5,23 @@
   "framework": "vite",
   "outputDirectory": "dist",
   "functions": {
-    "api/chat.js": { "maxDuration": 60 },
-    "api/drive-file.js": { "maxDuration": 60 },
-    "api/drive-upload-session.js": { "maxDuration": 60 },
-    "api/drive-upload-discard.js": { "maxDuration": 60 }
-  }
+    "api/chat.js": {
+      "maxDuration": 60
+    },
+    "api/drive-file.js": {
+      "maxDuration": 60
+    },
+    "api/drive-upload-session.js": {
+      "maxDuration": 60
+    },
+    "api/drive-upload-discard.js": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/keepalive",
+      "schedule": "0 2 * * *"
+    }
+  ]
 }
