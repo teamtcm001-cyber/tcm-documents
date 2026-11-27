@@ -452,6 +452,46 @@ export async function fetchAllProjectsForAdmin() {
   return data || [];
 }
 
+// ---- file access log (admin only; scripts/file-access-log.sql) ----
+// Who opened / downloaded which file. Written ONLY by /api/drive-url (RPC log_file_access); read here,
+// RLS lets admins only. Paged by id (newest first): pass `beforeId` = the last id of the previous page.
+export const ACCESS_LOG_NOT_INSTALLED =
+  'ยังไม่ได้เปิดใช้บันทึกการเปิด/ดาวน์โหลดไฟล์ — ให้ผู้ดูแลระบบรันสคริปต์ scripts/file-access-log.sql ใน Supabase SQL Editor';
+export const ACCESS_LOG_PAGE = 100;
+export async function fetchFileAccessLog({ userId, projectId, action, fromDate, toDate, beforeId } = {}) {
+  let q = supabase
+    .from('file_access_log')
+    .select('id, at, user_id, user_email, user_name, file_id, file_name, project_id, project_code, action')
+    .order('id', { ascending: false })
+    .limit(ACCESS_LOG_PAGE);
+  if (userId) q = q.eq('user_id', userId);
+  if (projectId) q = q.eq('project_id', projectId);
+  if (action) q = q.eq('action', action);
+  // dates are Thailand calendar days (YYYY-MM-DD), inclusive
+  if (fromDate && isIsoDate(fromDate)) q = q.gte('at', `${fromDate}T00:00:00+07:00`);
+  if (toDate && isIsoDate(toDate)) {
+    // up to the START of the next Thai day (timestamptz keeps microseconds: no "23:59:59.999" gap)
+    const next = new Date(`${toDate}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    q = q.lt('at', `${next.toISOString().slice(0, 10)}T00:00:00+07:00`);
+  }
+  if (beforeId) q = q.lt('id', beforeId);
+  const { data, error } = await q;
+  if (error) {
+    const code = String(error.code || '');
+    const msg = error.message || '';
+    if (code === '42P01' || code === 'PGRST205' || (/file_access_log/.test(msg) && /does not exist|could not find/i.test(msg))) {
+      throw new AppError(ACCESS_LOG_NOT_INSTALLED, 'not_available');
+    }
+    if (isJwtError(error)) {
+      reportAuthProblem('expired');
+      throw new AppError(SESSION_EXPIRED_MESSAGE, 'unauthorized');
+    }
+    throw new AppError('โหลดประวัติการเปิด/ดาวน์โหลดไฟล์ไม่สำเร็จ กรุณาลองใหม่', 'read_failed');
+  }
+  return data || [];
+}
+
 // Bulk import (admin only): every project with its Project Co text, and EVERY project_members row.
 export async function fetchProjectsForImport() {
   const { data, error } = await supabase.from('projects').select('id, code, name, project_co').order('name', { ascending: true });
@@ -1006,14 +1046,16 @@ const FILE_URL_ERRORS = {
 };
 
 // -> absolute URL string. { download, name } become part of the signature (attachment filename).
-export async function getSignedFileUrl(fileId, { download = false, name } = {}) {
+// `purpose` ('view' default | 'reindex') only names the access in the admin-only access log; a download is logged
+// as 'download' by the server.
+export async function getSignedFileUrl(fileId, { download = false, name, purpose } = {}) {
   if (fileId === undefined || fileId === null || fileId === '') throw new AppError('ไม่พบไฟล์', 'not_found');
   let res;
   try {
     res = await authFetch('/api/drive-url', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileId, ...(download ? { download: true } : {}), ...(name ? { name } : {}) }),
+      body: JSON.stringify({ fileId, ...(download ? { download: true } : {}), ...(name ? { name } : {}), ...(purpose ? { purpose } : {}) }),
     });
   } catch (err) {
     if (err instanceof AppError) throw err;
@@ -1073,9 +1115,9 @@ export async function getSignedFileUrls(fileIds, { signal } = {}) {
 
 // fetch() the file bytes. A link that expired between minting and use (403 link_expired)
 // is re-requested ONCE.
-export async function fetchFileResponse(fileId, { download = false, name } = {}) {
+export async function fetchFileResponse(fileId, { download = false, name, purpose } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const url = await getSignedFileUrl(fileId, { download, name });
+    const url = await getSignedFileUrl(fileId, { download, name, purpose });
     const res = await fetch(url);
     if (res.status === 403 && attempt === 0) {
       const body = await res.clone().json().catch(() => null);
@@ -1087,7 +1129,7 @@ export async function fetchFileResponse(fileId, { download = false, name } = {})
 
 // Get file blob (for reindexing)
 export async function getFileBlob(fileId) {
-  const res = await fetchFileResponse(fileId);
+  const res = await fetchFileResponse(fileId, { purpose: 'reindex' });
   if (!res.ok) throw new Error('ไม่สามารถอ่านไฟล์จาก Google Drive ได้');
   return res.blob();
 }

@@ -5,6 +5,7 @@ import { RoleBadge } from './AccessBits.jsx'
 import { CreateUserDialog, TempPasswordDialog } from './AdminCreateUser.jsx'
 import AdminUserDialog from './AdminUserDialog.jsx'
 import AdminImport from './AdminImport.jsx'
+import AdminAccessLog from './AdminAccessLog.jsx'
 import { useToast } from './Toast.jsx'
 import { useAuth } from '../auth/AuthContext.jsx'
 import { adminListUsers, fetchAllProjectsForAdmin } from '../api/supabase.js'
@@ -65,6 +66,7 @@ export default function AdminConsole() {
   const [roleFilter, setRoleFilter] = useState('all')
   const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [logOpen, setLogOpen] = useState(false)
   const [manageId, setManageId] = useState(null)
   const [secret, setSecret] = useState(null) // { kind, email, name, password, then? } — shown once, never persisted
 
@@ -153,6 +155,9 @@ export default function AdminConsole() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn btn-ghost btn-sm" onClick={load} disabled={loading}>
               <Icon name="refresh" size={14} /> รีเฟรช
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setLogOpen(true)} data-testid="access-log-open">
+              <Icon name="eye" size={14} /> ประวัติการเปิด/ดาวน์โหลดไฟล์
             </button>
             <button className="btn btn-ghost btn-sm" onClick={() => setImportOpen(true)} data-testid="import-open">
               <Icon name="upload" size={14} /> นำเข้าจากไฟล์ Excel
@@ -247,6 +252,8 @@ export default function AdminConsole() {
       )}
 
       {importOpen && <AdminImport onClose={() => setImportOpen(false)} onDone={load} />}
+
+      {logOpen && <AdminAccessLog users={users} projects={projects} onClose={() => setLogOpen(false)} />}
 
       {managed && (
         <AdminUserDialog

@@ -1404,3 +1404,18 @@ button.ref-chip:hover, button.ref-chip:focus-visible { background: rgba(45,190,9
 .file-pill .nm .ref-chip { margin: 0 6px 0 0; }
 .chat-refs-h { margin-top: 10px; font-size: 10px; color: var(--gray-500); display: flex; flex-direction: column; gap: 4px; }
 .chat-ref-sys { font-size: 11px; color: var(--gray-700, #444); line-height: 1.5; }
+
+/* ===== Admin: file access log ===== */
+.acl-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.acl-filters .field { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; min-width: 0; }
+.acl-filters select, .acl-filters input { min-width: 0; width: 100%; }
+.acl-table-wrap { overflow-x: auto; max-height: 55vh; overflow-y: auto; border: 1px solid var(--gray-200, #e5e7eb); border-radius: 8px; }
+.acl-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.acl-table th { position: sticky; top: 0; background: var(--gray-100, #f3f4f6); text-align: left; padding: 7px 10px; font-weight: 600; }
+.acl-table td { padding: 7px 10px; border-top: 1px solid var(--gray-200, #e5e7eb); vertical-align: top; }
+.acl-table .nowrap { white-space: nowrap; }
+.acl-table .acl-file { word-break: break-word; min-width: 180px; }
+.acl-msg { padding: 24px; text-align: center; }
+
+.acl-notice { margin: 0 0 10px; padding: 8px 12px; border-radius: 8px; background: var(--gray-100, #f3f4f6); font-size: 12.5px; }
+.acl-notice-err { color: var(--red); background: rgba(220, 38, 38, 0.08); }
